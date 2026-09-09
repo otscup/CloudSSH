@@ -23,13 +23,18 @@ try {
   // Dependencies are installed explicitly by developers/CI. Keeping installs out
   // of the build makes production artifacts deterministic and offline-buildable.
   const executableSuffix = process.platform === 'win32' ? '.cmd' : '';
+  // On Windows, spawning a .cmd shim without a shell throws EINVAL; route it
+  // through cmd.exe so the shim's NODE_PATH/PATHEXT setup actually runs.
+  const winShell = process.platform === 'win32' ? { shell: 'cmd.exe' } : {};
   execFileSync(path.join(frontendDir, 'node_modules', '.bin', `tsc${executableSuffix}`), [], {
     cwd: frontendDir,
     stdio: 'inherit',
+    ...winShell,
   });
   execFileSync(path.join(frontendDir, 'node_modules', '.bin', `vite${executableSuffix}`), ['build'], {
     cwd: frontendDir,
     stdio: 'inherit',
+    ...winShell,
   });
 
   console.log('Inlining assets...');
