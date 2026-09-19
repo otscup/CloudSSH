@@ -57,11 +57,19 @@
   --control-min-height: 32px;
   --card-padding: 1.25rem;
   --panel-gap: 0.75rem;
+  /* 滚动条尺寸（不随主题变化） */
+  --scrollbar-size: 8px;
   --terminal-frame-gap: 6px;
+  /* 侧边抽屉（SFTP / 自定义命令 / AI Agent）顶部让位高度。
+     桌面端顶栏为 h-16 = 4rem，抽屉必须从其下方展开，
+     否则全高浮层会盖住顶栏的分段切换器，导致抽屉之间无法直接切换。
+     移动端在响应式区块中复位为 0。 */
+  --drawer-top: 4rem;
   --shadow-card: none;
   --shadow-modal: 0 18px 52px rgba(0, 0, 0, 0.48);
   --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.34);
   --surface-blur: 0px;
+  --surface-saturate: 100%;
   --motion-fast: 120ms;
   --motion-normal: 220ms;
   --motion-slow: 320ms;
@@ -211,8 +219,8 @@ body::before {
 
 /* 环境背景漂移：主题显式声明 drift 时启用；motion=none 与系统级减少动态时停止 */
 html[data-bg-animation='drift'] body::before {
-  background-size: 200% 200%;
-  animation: theme-bg-drift 40s ease-in-out infinite alternate;
+  background-size: 130% 130%;
+  animation: theme-bg-drift 35s ease-in-out infinite alternate;
 }
 
 html[data-ui-motion='none'] body::before {
@@ -353,6 +361,14 @@ body.terminal-active {
   padding: var(--terminal-frame-gap);
 }
 
+.terminal-footer,
+.user-space-footer {
+  height: 32px;
+  min-height: 32px;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
 #terminal-wrapper {
   border-radius: var(--card-radius);
   box-shadow: var(--shadow-card);
@@ -478,6 +494,21 @@ html:not([data-fx-flicker='on']) .flicker {
   color: var(--text-dim);
 }
 
+/* 隐藏浏览器在 input 上的原生指示器（如 WebKit datalist 粗黑下三角） */
+#ai-model::-webkit-calendar-picker-indicator {
+  display: none;
+  opacity: 0;
+}
+
+/* 移除 search 类型输入框的原生清除按钮与装饰 */
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-results-button,
+input[type="search"]::-webkit-search-results-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 /* Windows Chromium 的原生下拉面板不会可靠继承 select 背景，需要显式适配主题。 */
 select option,
 select optgroup {
@@ -565,8 +596,51 @@ select optgroup {
   background-size: 100% 4px;
 }
 
+/* ==================== 滚动条 ====================
+   目标：避免各主题下出现系统原生滚动条外观，并让滚动条跟随主题着色
+   （4 套内置主题都定义了 --scrollbar-* 变量）。
+   - 全局兜底使用伪元素级 / 通配级特异性，因此 .custom-scrollbar、.no-scrollbar
+     以及组件自身的滚动条规则都仍可按类优先级覆盖；
+   - 尺寸固定不随主题变化，避免切换主题时滚动条宽度变化导致终端列数需重算；
+   - 需要隐藏滚动条但仍可滚动的横向容器（胶囊、面包屑等）使用 .no-scrollbar。 */
+::-webkit-scrollbar {
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* Firefox：scrollbar-color 可继承、scrollbar-width 不可继承，故用通配级兜底 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+/* 隐藏滚动条但保留滚动能力 */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 显式声明主题化滚动条（语义标记，数值与全局兜底一致） */
 .custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
+  width: var(--scrollbar-size);
+  height: var(--scrollbar-size);
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
@@ -769,8 +843,19 @@ select optgroup {
 
 .responsive-modal-panel {
   max-height: calc(var(--visual-viewport-height) - 32px);
+  /* 绝不能出现横向滚动条：overflow-y 非 visible 会使 overflow-x 计算为 auto，
+     一旦内部有无法收缩的宽内容（如模型行里 shrink-0 的按钮），弹窗就会冒出
+     原生横向滚动条并把内容挤到可视区外。横向溢出必须靠让内容真正收缩
+     （flex 子项 min-width: 0）消除，而不是滚动。纵向滚动条已在上方主题化。 */
+  overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* 表单控件在 flex 行内必须允许收缩：.terminal-input 的 width:100% 叠加
+   自动最小尺寸（约等于 size 属性宽度）会在窄弹窗中把同级控件顶出面板。 */
+.responsive-modal-panel .terminal-input {
+  min-width: 0;
 }
 
 #server-grid {
@@ -821,7 +906,8 @@ select optgroup {
 /* Modal 遮罩 */
 .modal-overlay {
   background: var(--modal-overlay);
-  backdrop-filter: blur(var(--surface-blur));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
 }
 
 /* ==================== Unified Feedback ==================== */
@@ -851,7 +937,8 @@ select optgroup {
   border-left: 3px solid var(--feedback-color);
   border-radius: var(--card-radius);
   box-shadow: var(--shadow-floating);
-  backdrop-filter: blur(var(--surface-blur));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
   opacity: 0;
   transform: translateX(18px);
   transition:
@@ -947,7 +1034,8 @@ select optgroup {
 
 .app-dialog::backdrop {
   background: var(--modal-overlay);
-  backdrop-filter: blur(var(--surface-blur));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
   animation: app-dialog-backdrop-in var(--motion-normal) ease-out;
 }
 
@@ -1120,7 +1208,8 @@ select optgroup {
 
 .auth-challenge-dialog::backdrop {
   background: var(--modal-overlay);
-  backdrop-filter: blur(var(--surface-blur));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
   animation: app-dialog-backdrop-in var(--motion-normal) ease-out;
 }
 
@@ -1806,7 +1895,849 @@ html[data-component-tabs="segmented"] .auth-tab-active {
 
 html[data-ui-style="soft"] :is(header, footer) {
   background: color-mix(in srgb, var(--bg-elevated) 90%, transparent);
-  backdrop-filter: blur(var(--surface-blur));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+}
+
+/* ==================== Liquid Glass (macOS 26 风格 - 参考 shuding/liquid-glass 光学建模与苹果设计规范) ==================== */
+html[data-ui-style="liquid"] {
+  --surface-blur: 20px;
+  --surface-saturate: 190%;
+  --surface-contrast: 112%;
+  --surface-brightness: 106%;
+  --hover-lift: -4px;
+  /* 五层物理厚玻璃光影模型：大弥散环境阴影 + 顶棱 1px 镜面天光微棱线 + 底部内反光厚度辉光 + 1px 环形微描边 */
+  --shadow-card: 
+    0 20px 48px -12px rgba(31, 38, 135, 0.12),
+    0 4px 12px -2px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.95),
+    inset 0 -8px 22px -4px rgba(255, 255, 255, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.25);
+  --shadow-modal: 
+    0 32px 72px -16px rgba(0, 0, 0, 0.28),
+    0 12px 28px -4px rgba(0, 0, 0, 0.08),
+    inset 0 1px 0 0 rgba(255, 255, 255, 1),
+    inset 0 -12px 28px -6px rgba(255, 255, 255, 0.1),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+  --shadow-floating: 
+    0 18px 40px -8px rgba(0, 102, 218, 0.22),
+    0 4px 12px -2px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.9),
+    inset 0 -6px 16px -3px rgba(255, 255, 255, 0.06),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+/* 用户空间（服务器列表）全域无界流体画布：消除顶栏与底栏的实体底色与硬分割线，使全屏流体壁纸浑然一体 */
+html[data-ui-style="liquid"] div#user-space-section {
+  background: transparent;
+}
+
+html[data-ui-style="liquid"] #user-space-section :is(.user-space-header, .user-space-footer) {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: none;
+  box-shadow: none;
+}
+
+/* 终端会话页顶栏与标签栏（高透微晶磨砂） */
+html[data-ui-style="liquid"] .terminal-app-header {
+  background: color-mix(in srgb, var(--bg-surface) 25%, rgba(255, 255, 255, 0.22));
+  -webkit-backdrop-filter: blur(24px) saturate(var(--surface-saturate)) contrast(var(--surface-contrast, 100%)) brightness(var(--surface-brightness, 100%));
+  backdrop-filter: blur(24px) saturate(var(--surface-saturate)) contrast(var(--surface-contrast, 100%)) brightness(var(--surface-brightness, 100%));
+  border-bottom: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.03);
+}
+
+html[data-ui-style="liquid"] #tab-bar {
+  background: color-mix(in srgb, var(--bg-surface) 25%, rgba(255, 255, 255, 0.22));
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.45);
+}
+
+/* 终端会话页底栏（极轻透明度悬浮，消除沉重白底） */
+html[data-ui-style="liquid"] .terminal-footer {
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border-top: none;
+  height: 32px;
+}
+
+/* 用户空间顶栏微透镜胶囊操作项 */
+html[data-ui-style="liquid"] .user-space-header .theme-selector {
+  background: rgba(255, 255, 255, 0.55);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 
+    0 2px 8px -2px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.9);
+  border-radius: calc(8px * var(--radius-scale, 1));
+}
+
+html[data-ui-style="liquid"] .user-space-header .theme-selector:hover,
+html[data-ui-style="liquid"] .user-space-header .theme-selector:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 
+    0 0 0 3px rgba(0, 102, 218, 0.22),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.95);
+}
+
+/* ==================== 液态分段主题切换器（Liquid Segmented Theme Control） ==================== */
+.theme-segmented-wrapper {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+}
+
+.theme-segmented-bar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  background: color-mix(in srgb, var(--bg-surface) 60%, rgba(255, 255, 255, 0.45));
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: 9999px;
+  padding: 3px;
+  box-shadow: 
+    inset 0 1px 2px rgba(0, 0, 0, 0.04),
+    0 2px 6px -1px rgba(0, 0, 0, 0.03);
+}
+
+.theme-segmented-btn {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.25s ease;
+  user-select: none;
+  white-space: nowrap;
+  outline: none;
+}
+
+.theme-segmented-btn:hover {
+  color: var(--text);
+}
+
+.theme-segmented-btn.active {
+  color: var(--accent);
+}
+
+.theme-segmented-btn .theme-segmented-icon {
+  font-size: 14px;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.theme-segmented-btn:hover .theme-segmented-icon {
+  transform: scale(1.15);
+}
+
+/* 3D 动态液态透镜滑块（双边异步物理弹簧驱动：五层厚玻璃材质） */
+.theme-segmented-lens {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  width: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--bg-surface) 35%, rgba(255, 255, 255, 0.88));
+  -webkit-backdrop-filter: blur(20px) saturate(190%) contrast(115%) brightness(108%);
+  backdrop-filter: blur(20px) saturate(190%) contrast(115%) brightness(108%);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-top-color: rgba(255, 255, 255, 1);
+  border-bottom-color: rgba(255, 255, 255, 0.45);
+  box-shadow: 
+    0 4px 14px -2px rgba(0, 102, 218, 0.22),
+    0 1px 3px 0 rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 1),
+    inset 0 -3px 6px -1px rgba(255, 255, 255, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  will-change: transform, width;
+  opacity: 0;
+}
+
+/* 赛博朋克与暗色风格适配 */
+html[data-theme="cyberpunk"] .theme-segmented-bar {
+  background: rgba(18, 18, 18, 0.85);
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 0 8px rgba(74, 246, 38, 0.1);
+}
+
+html[data-theme="cyberpunk"] .theme-segmented-lens {
+  background: rgba(74, 246, 38, 0.15);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+html[data-theme="standard-dark"] .theme-segmented-bar {
+  background: rgba(30, 35, 45, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+html[data-theme="standard-dark"] .theme-segmented-lens {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+html[data-theme="standard-light"] .theme-segmented-bar {
+  background: rgba(240, 243, 246, 0.85);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+html[data-theme="standard-light"] .theme-segmented-lens {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* ==================== 终端抽屉功能分段切换器（Drawer Segmented Control） ==================== */
+.drawer-segmented-bar {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  background: color-mix(in srgb, var(--bg-surface) 45%, rgba(255, 255, 255, 0.38));
+  -webkit-backdrop-filter: blur(16px) saturate(160%);
+  backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 9999px;
+  padding: 2px 3px;
+  /* 清晰的“凹槽”轮廓：外层极浅冷色双描边 + 内侧顶光凹影 + 底缘内高光，
+     保证在浅色半透明背景上胶囊边缘依然可辨识 */
+  box-shadow:
+    0 0 0 1px rgba(31, 38, 135, 0.16),
+    inset 0 0 0 1px rgba(31, 38, 135, 0.05),
+    inset 0 1.5px 3px rgba(0, 0, 0, 0.08),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.9),
+    0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.drawer-segmented-btn {
+  position: relative;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 9999px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.25s ease;
+  user-select: none;
+  white-space: nowrap;
+  outline: none;
+}
+
+.drawer-segmented-btn:hover {
+  color: var(--text);
+}
+
+.drawer-segmented-btn.active {
+  color: var(--accent);
+}
+
+.drawer-segmented-btn .drawer-btn-icon {
+  font-size: 14px;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.drawer-segmented-btn:hover .drawer-btn-icon {
+  transform: scale(1.15);
+}
+
+/* 3D 动态抽屉透镜滑块（双边异步物理弹簧驱动） */
+.drawer-segmented-lens {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  width: 0;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--bg-surface) 35%, rgba(255, 255, 255, 0.88));
+  -webkit-backdrop-filter: blur(20px) saturate(190%) contrast(115%) brightness(108%);
+  backdrop-filter: blur(20px) saturate(190%) contrast(115%) brightness(108%);
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  border-top-color: rgba(255, 255, 255, 1);
+  border-bottom-color: rgba(255, 255, 255, 0.45);
+  box-shadow: 
+    0 4px 14px -2px rgba(0, 102, 218, 0.22),
+    0 1px 3px 0 rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 1),
+    inset 0 -3px 6px -1px rgba(255, 255, 255, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+  will-change: transform, width;
+  opacity: 0;
+}
+
+/* 赛博朋克与暗色模式适配 */
+html[data-theme="cyberpunk"] .drawer-segmented-bar {
+  background: rgba(18, 18, 18, 0.85);
+  border: 1px solid var(--border-strong);
+}
+html[data-theme="cyberpunk"] .drawer-segmented-lens {
+  background: rgba(74, 246, 38, 0.15);
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+html[data-theme="standard-dark"] .drawer-segmented-bar {
+  background: rgba(30, 35, 45, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+html[data-theme="standard-dark"] .drawer-segmented-lens {
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+}
+html[data-theme="standard-light"] .drawer-segmented-bar {
+  background: rgba(240, 243, 246, 0.85);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+html[data-theme="standard-light"] .drawer-segmented-lens {
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+/* 桌面端悬浮玻璃灵动岛（Glass Dynamic Island） */
+@media (min-width: 768px) {
+  .user-space-header-actions #user-theme-selector {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: 0;
+    opacity: 0.001;
+    pointer-events: none;
+  }
+
+  /* 终端会话顶栏操作灵动岛 */
+  html[data-ui-style="liquid"] .terminal-header-actions {
+    background: color-mix(in srgb, var(--bg-surface) 20%, rgba(255, 255, 255, 0.7));
+    -webkit-backdrop-filter: blur(28px) saturate(200%) contrast(112%) brightness(106%);
+    backdrop-filter: blur(28px) saturate(200%) contrast(112%) brightness(106%);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-top: 1.5px solid rgba(255, 255, 255, 1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 9999px;
+    padding: 3px 8px;
+    box-shadow: 
+      0 14px 36px -6px rgba(31, 38, 135, 0.14),
+      0 2px 8px -1px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 0 rgba(255, 255, 255, 1),
+      inset 0 -4px 12px -2px rgba(255, 255, 255, 0.35);
+    gap: 6px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  html[data-ui-style="liquid"] .terminal-header-actions .theme-selector {
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--bg-surface) 35%, rgba(255, 255, 255, 0.75));
+    -webkit-backdrop-filter: blur(16px) saturate(170%);
+    backdrop-filter: blur(16px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-top-color: rgba(255, 255, 255, 1);
+    border-bottom-color: rgba(255, 255, 255, 0.4);
+    padding: 4px 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--on-surface);
+  }
+
+  /* 注意：必须排除 .mobile-only，否则 display:inline-flex 会以更高优先级
+     覆盖 .mobile-only{display:none}，导致移动端“更多操作”按钮在 PC 端泄露显示。 */
+  html[data-ui-style="liquid"] .terminal-header-actions > button:not(.mobile-only) {
+    border-radius: 9999px;
+    width: 28px;
+    height: 28px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  html[data-ui-style="liquid"] .terminal-header-actions > button:not(.mobile-only):hover {
+    background: rgba(255, 255, 255, 0.7);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-color: rgba(255, 255, 255, 0.9);
+    color: var(--on-surface);
+    box-shadow: 0 2px 8px -2px rgba(0, 0, 0, 0.05), inset 0 1px 0 0 rgba(255, 255, 255, 1);
+    transform: translateY(-1px) scale(1.06);
+  }
+
+  html[data-ui-style="liquid"] .terminal-header-actions #disconnect-btn:hover {
+    color: var(--error);
+    background: rgba(255, 235, 233, 0.75);
+    border-color: rgba(255, 180, 171, 0.8);
+  }
+
+  /* 桌面端兜底：任何 .mobile-only 元素都不得显示（移动端媒体查询未命中时生效） */
+  html[data-ui-style="liquid"] .terminal-header-actions > .mobile-only:not(.hidden) {
+    display: none;
+  }
+
+  /* 悬浮灵动玻璃岛（Glass Dynamic Island）全圆角胶囊外壳 */
+  html[data-ui-style="liquid"] .user-space-header-actions {
+    position: relative;
+    background: color-mix(in srgb, var(--bg-surface) 20%, rgba(255, 255, 255, 0.7));
+    -webkit-backdrop-filter: blur(28px) saturate(200%) contrast(112%) brightness(106%);
+    backdrop-filter: blur(28px) saturate(200%) contrast(112%) brightness(106%);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-top: 1.5px solid rgba(255, 255, 255, 1);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 9999px; /* 极致全圆角灵动岛 */
+    padding: 5px 12px;
+    box-shadow: 
+      0 14px 36px -6px rgba(31, 38, 135, 0.14),
+      0 2px 8px -1px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 0 rgba(255, 255, 255, 1),
+      inset 0 -4px 12px -2px rgba(255, 255, 255, 0.35),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.4);
+    gap: 8px;
+    display: inline-flex;
+    align-items: center;
+    transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  html[data-ui-style="liquid"] .user-space-header-actions:hover {
+    box-shadow: 
+      0 18px 44px -6px rgba(0, 102, 218, 0.18),
+      0 4px 12px -1px rgba(0, 0, 0, 0.05),
+      inset 0 1px 0 0 rgba(255, 255, 255, 1),
+      inset 0 -4px 12px -2px rgba(255, 255, 255, 0.45);
+    border-color: rgba(255, 255, 255, 0.95);
+  }
+
+  /* 岛内主题选择器备用（全圆角微晶胶囊） */
+  html[data-ui-style="liquid"] .user-space-header-actions .theme-selector {
+    border-radius: 9999px;
+    background: color-mix(in srgb, var(--bg-surface) 35%, rgba(255, 255, 255, 0.75));
+    -webkit-backdrop-filter: blur(16px) saturate(170%);
+    backdrop-filter: blur(16px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-top-color: rgba(255, 255, 255, 1);
+    border-bottom-color: rgba(255, 255, 255, 0.4);
+    padding: 5px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--on-surface);
+    box-shadow: 
+      0 2px 6px -1px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.95);
+    cursor: pointer;
+    transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  html[data-ui-style="liquid"] .user-space-header-actions .theme-selector:hover,
+  html[data-ui-style="liquid"] .user-space-header-actions .theme-selector:focus-visible {
+    border-color: var(--accent);
+    background: rgba(255, 255, 255, 0.9);
+    box-shadow: 
+      0 0 0 3px rgba(0, 102, 218, 0.18),
+      inset 0 1px 0 0 rgba(255, 255, 255, 1);
+  }
+
+  /* 岛内功能按钮：全圆角微药丸透镜 */
+  html[data-ui-style="liquid"] .user-space-header-actions .theme-toolbar-button,
+  html[data-ui-style="liquid"] .user-space-header-actions .user-space-menu-action {
+    border-radius: 9999px;
+    width: 32px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  html[data-ui-style="liquid"] .user-space-header-actions .theme-toolbar-button:hover,
+  html[data-ui-style="liquid"] .user-space-header-actions .user-space-menu-action:hover {
+    background: rgba(255, 255, 255, 0.7);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-color: rgba(255, 255, 255, 0.9);
+    color: var(--on-surface);
+    box-shadow: 
+      0 2px 8px -2px rgba(0, 0, 0, 0.05),
+      inset 0 1px 0 0 rgba(255, 255, 255, 1);
+    transform: translateY(-1px) scale(1.06);
+  }
+
+  html[data-ui-style="liquid"] .user-space-header-actions .user-space-menu-action.text-error:hover {
+    color: var(--error);
+    background: rgba(255, 235, 233, 0.75);
+    border-color: rgba(255, 180, 171, 0.8);
+  }
+
+  /* 岛内语言切换微药丸 */
+  html[data-ui-style="liquid"] .user-space-header-actions .language-toggle {
+    border-radius: 9999px;
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 4px 10px;
+    transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  html[data-ui-style="liquid"] .user-space-header-actions .language-toggle:hover {
+    background: rgba(255, 255, 255, 0.7);
+    border-color: rgba(255, 255, 255, 0.9);
+    box-shadow: 
+      0 2px 8px -2px rgba(0, 0, 0, 0.05),
+      inset 0 1px 0 0 rgba(255, 255, 255, 1);
+    transform: translateY(-1px);
+  }
+
+  /* 岛内用户信息微胶囊 */
+  html[data-ui-style="liquid"] .user-space-header-actions #user-info {
+    border-radius: 9999px;
+    background: rgba(255, 255, 255, 0.45);
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    padding: 3px 10px 3px 4px;
+    min-height: 32px;
+  }
+
+  html[data-ui-style="liquid"] .user-space-header-actions .user-space-action-label {
+    display: none;
+  }
+}
+
+html[data-ui-style="liquid"] :is(.server-card, .cyber-box) {
+  position: relative;
+  background: var(--bg-surface);
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate)) contrast(var(--surface-contrast, 100%)) brightness(var(--surface-brightness, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate)) contrast(var(--surface-contrast, 100%)) brightness(var(--surface-brightness, 100%));
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-top-color: rgba(255, 255, 255, 0.95);
+  border-bottom-color: rgba(255, 255, 255, 0.2);
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow-card);
+  transition: transform 0.42s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease, border-color 0.3s ease;
+}
+
+/* 裁剪只对卡片生效（指针天光 ::before 用 inset:0 + border-radius:inherit 自会
+   贴合圆角，此处仅为防御性双保险）。
+   ⚠️ 绝不可把 overflow 简写写进上面的 :is(.server-card, .cyber-box) 规则：
+   `overflow: hidden` 会同时把 overflow-x/overflow-y 置为 hidden，且本选择器
+   特异性高于 Tailwind 的 .overflow-y-auto。而 #ai-model-menu（AI 模型下拉）与
+   分享管理列表都带有 .cyber-box 并依赖 overflow-y-auto 滚动，一旦被改成 hidden，
+   long 列表即无法滚动 / 无法选择（v2.3.0 回归缺陷）。
+   另：唯一需要裁剪的 .theme-accent-line 在非 cyberpunk 风格下为 opacity:0，
+   故 Liquid Glass 下对 .cyber-box 本就不需要任何裁剪。 */
+html[data-ui-style="liquid"] .server-card {
+  overflow: hidden;
+}
+
+/* 隐藏赛博朋克风格的硬渐变顶线，保持液态透镜纯净质感 */
+html[data-ui-style="liquid"] .server-card > div:first-child.bg-gradient-to-r {
+  display: none;
+}
+
+/* 鼠标跟随动态镜面天光反光（Pointer-Follow Specular），仅通过 --mx / --my 驱动 */
+html[data-ui-style="liquid"] .server-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(
+    280px circle at var(--mx, 50%) var(--my, 0%),
+    rgba(255, 255, 255, 0.45),
+    transparent 65%
+  );
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  z-index: 0;
+}
+
+html[data-ui-style="liquid"] .server-card:hover::before {
+  opacity: 1;
+}
+
+html[data-ui-style="liquid"] .server-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+html[data-ui-style="liquid"] .server-card:hover {
+  transform: translateY(-4px) scale(1.008);
+  border-color: rgba(0, 102, 218, 0.38);
+  border-top-color: rgba(255, 255, 255, 1);
+  box-shadow: 
+    0 28px 56px -12px rgba(0, 102, 218, 0.2),
+    0 6px 16px -2px rgba(0, 0, 0, 0.05),
+    inset 0 1px 0 0 rgba(255, 255, 255, 1),
+    inset 0 -10px 24px -4px rgba(0, 102, 218, 0.08),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.35);
+}
+
+html[data-ui-style="liquid"] .server-card:active {
+  transform: scale(0.985);
+  transition: transform 0.15s ease;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  html[data-ui-style="liquid"] .server-card::before {
+    display: none;
+  }
+}
+
+html[data-ui-style="liquid"] :is(.app-dialog__panel, .remote-editor__panel, .auth-challenge-dialog__panel) {
+  background: color-mix(in srgb, var(--bg-surface) 60%, rgba(255, 255, 255, 0.35));
+  -webkit-backdrop-filter: blur(32px) saturate(200%) contrast(115%) brightness(108%);
+  backdrop-filter: blur(32px) saturate(200%) contrast(115%) brightness(108%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-top-color: rgba(255, 255, 255, 1);
+  border-bottom-color: rgba(255, 255, 255, 0.25);
+  border-radius: var(--modal-radius);
+  box-shadow: var(--shadow-modal);
+}
+
+html[data-ui-style="liquid"] :is(#agent-panel, #sftp-panel, #snippet-panel) {
+  background: color-mix(in srgb, var(--bg-surface) 15%, rgba(255, 255, 255, 0.78));
+  -webkit-backdrop-filter: blur(32px) saturate(200%) contrast(115%) brightness(106%);
+  backdrop-filter: blur(32px) saturate(200%) contrast(115%) brightness(106%);
+  border-left: 1.5px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 
+    -20px 0 60px -10px rgba(31, 38, 135, 0.16),
+    inset 1px 0 0 0 rgba(255, 255, 255, 1);
+}
+
+/* 三大抽屉面板统一高光微透明 Header */
+html[data-ui-style="liquid"] :is(#agent-panel, #sftp-panel, #snippet-panel) :is(.agent-panel-header, .sftp-panel-header) {
+  background: color-mix(in srgb, var(--bg-surface) 25%, rgba(255, 255, 255, 0.5));
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+/* AI Agent 与 SFTP 的内层包裹使用了不透明底色（var(--bg) / bg-surface），
+   会盖住面板本身的毛玻璃；置为透明后三者玻璃质感才真正一致。 */
+html[data-ui-style="liquid"] :is(#agent-panel, #sftp-panel) > div:first-child {
+  background: transparent;
+  border-left: 0;
+}
+
+/* 自定义命令模块专项统一：去除生硬色块 */
+html[data-ui-style="liquid"] #snippet-category-chips {
+  background: transparent;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+html[data-ui-style="liquid"] #snippet-form-container {
+  background: rgba(255, 255, 255, 0.45);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+html[data-ui-style="liquid"] #snippet-list > div {
+  background: rgba(255, 255, 255, 0.72);
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-top-color: rgba(255, 255, 255, 1);
+  box-shadow: 
+    0 4px 16px -3px rgba(31, 38, 135, 0.08),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.95);
+  border-radius: calc(12px * var(--radius-scale, 1));
+}
+
+html[data-ui-style="liquid"] #snippet-list pre {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: calc(6px * var(--radius-scale, 1));
+}
+
+html[data-ui-style="liquid"] .snippet-category-chip {
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+html[data-ui-style="liquid"] .snippet-category-chip.active {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px -1px rgba(0, 102, 218, 0.3);
+}
+
+html[data-ui-style="liquid"] #snippet-panel > div:last-child {
+  background: color-mix(in srgb, var(--bg-surface) 25%, rgba(255, 255, 255, 0.5));
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+html[data-ui-style="liquid"] .cyber-button:not(.text-error) {
+  background: color-mix(in srgb, var(--bg-surface) 60%, rgba(255, 255, 255, 0.5));
+  -webkit-backdrop-filter: blur(14px) saturate(160%);
+  backdrop-filter: blur(14px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: calc(10px * var(--radius-scale, 1));
+  box-shadow: 
+    0 2px 6px -1px rgba(0, 0, 0, 0.04),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.85),
+    inset 0 -4px 10px -2px rgba(255, 255, 255, 0.06);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease, background 0.25s ease, border-color 0.25s ease;
+}
+
+html[data-ui-style="liquid"] .cyber-button:not(.text-error):hover {
+  background: color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.85));
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, rgba(255, 255, 255, 0.6));
+  box-shadow: 
+    0 4px 14px -2px rgba(0, 102, 218, 0.22),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.95);
+  transform: translateY(-1.5px) scale(1.02);
+}
+
+html[data-ui-style="liquid"] .cyber-button:not(.text-error):active {
+  background: color-mix(in srgb, var(--accent) 20%, rgba(255, 255, 255, 0.75));
+  border-color: var(--accent);
+  box-shadow: 
+    0 1px 4px -1px rgba(0, 102, 218, 0.2),
+    inset 0 1px 2px 0 rgba(0, 0, 0, 0.06);
+  transform: scale(0.965);
+  transition: transform 0.12s ease;
+}
+
+html[data-ui-style="liquid"] .connect-btn {
+  background: linear-gradient(180deg, #0a84ff 0%, #0066da 100%);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: calc(10px * var(--radius-scale, 1));
+  box-shadow: 
+    0 4px 14px -2px rgba(0, 102, 218, 0.4),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.5),
+    inset 0 -4px 10px -2px rgba(0, 0, 0, 0.15);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease, background 0.25s ease;
+}
+
+html[data-ui-style="liquid"] .connect-btn:hover {
+  background: linear-gradient(180deg, #1f8fff 0%, #0071e3 100%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow: 
+    0 6px 20px -2px rgba(0, 102, 218, 0.5),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.7);
+  transform: translateY(-1.5px) scale(1.02);
+}
+
+html[data-ui-style="liquid"] .connect-btn:active {
+  transform: scale(0.965);
+  box-shadow: 
+    0 2px 8px -2px rgba(0, 102, 218, 0.35),
+    inset 0 1px 2px rgba(0, 0, 0, 0.2);
+  transition: transform 0.12s ease;
+}
+
+/* 药丸微结构输入框与标签筛选 */
+html[data-ui-style="liquid"] .terminal-input {
+  background: color-mix(in srgb, var(--bg-surface) 75%, rgba(255, 255, 255, 0.45));
+  -webkit-backdrop-filter: blur(16px) saturate(170%);
+  backdrop-filter: blur(16px) saturate(170%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-top-color: rgba(255, 255, 255, 0.85);
+  border-radius: calc(12px * var(--radius-scale, 1));
+  box-shadow: 
+    0 2px 8px -2px rgba(0, 0, 0, 0.04),
+    inset 0 1px 1px 0 rgba(0, 0, 0, 0.04),
+    inset 0 -1px 0 0 rgba(255, 255, 255, 0.7);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+html[data-ui-style="liquid"] .terminal-input:focus {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: var(--accent);
+  border-top-color: var(--accent);
+  box-shadow: 
+    0 4px 16px -2px rgba(0, 102, 218, 0.22),
+    0 0 0 3.5px rgba(0, 102, 218, 0.18),
+    inset 0 1px 1px rgba(0, 0, 0, 0.02);
+}
+
+/* 终端 xterm 画布独立硬件合成层隔离安全区（保证 WebGL 60fps 刷新，彻底解耦外围滤镜，且不破坏同级浮层的 position: fixed） */
+.terminal-main .xterm {
+  position: relative;
+  z-index: 1;
+  transform: translateZ(0);
+}
+
+html[data-ui-style="liquid"] .tab-item {
+  border-radius: calc(8px * var(--radius-scale, 1));
+  transition: all var(--motion-fast) cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+html[data-ui-style="liquid"] .tab-item:hover:not(.active) {
+  background: rgba(255, 255, 255, 0.35);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+html[data-ui-style="liquid"] .tab-item.active {
+  background: rgba(255, 255, 255, 0.65);
+  -webkit-backdrop-filter: blur(16px) saturate(180%) contrast(110%);
+  backdrop-filter: blur(16px) saturate(180%) contrast(110%);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-top-color: rgba(255, 255, 255, 0.95);
+  box-shadow: 
+    0 4px 14px -2px rgba(0, 0, 0, 0.06),
+    inset 0 1px 1px 0 rgba(255, 255, 255, 1),
+    inset 0 -4px 8px -3px rgba(0, 0, 0, 0.03);
+}
+
+html[data-ui-style="liquid"] #terminal-wrapper {
+  background: var(--bg-terminal);
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate)) contrast(var(--surface-contrast, 100%)) brightness(var(--surface-brightness, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate)) contrast(var(--surface-contrast, 100%)) brightness(var(--surface-brightness, 100%));
+  box-shadow: 
+    0 18px 44px -12px rgba(31, 38, 135, 0.12),
+    0 2px 6px -1px rgba(0, 0, 0, 0.03),
+    inset 0 1px 0 0 rgba(255, 255, 255, 1),
+    inset 0 -8px 20px -4px rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-top-color: rgba(255, 255, 255, 1);
+  border-bottom-color: rgba(255, 255, 255, 0.35);
+  padding: 6px 12px; /* 适当收窄内边距，大幅减少四周多余留白 */
+}
+
+html[data-ui-style="liquid"] .terminal-status-bar {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+  opacity: 0.75;
+}
+
+html[data-ui-style="liquid"] #snippet-list > div:hover {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(0, 102, 218, 0.4);
+  border-top-color: rgba(255, 255, 255, 1);
+  box-shadow: 
+    0 8px 24px -4px rgba(0, 102, 218, 0.14),
+    inset 0 1px 0 rgba(255, 255, 255, 1);
+  transform: translateY(-1.5px);
 }
 
 html[data-ui-style="dense"] .server-card:hover {
@@ -1853,15 +2784,65 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
 
 /* ========== Agent Panel ========== */
 
-#agent-panel {
-  min-width: 280px;
-  width: min(clamp(420px, 40vw, 600px), 100%);
-  max-width: 100%;
-  height: 100%;
+/* 三大侧边抽屉（SFTP / 自定义命令 / AI Agent）共用同一几何尺寸。
+   此前宽度由各模块内联 style 各自声明（SFTP/Agent 为 420–600px，
+   自定义命令为 440–680px），导致同一屏幕下抽屉宽度明显不一致；
+   现集中收敛到此处唯一来源，内联宽度已移除。 */
+:is(#agent-panel, #sftp-panel, #snippet-panel) {
+  width: min(clamp(420px, 40vw, 600px), 100vw);
+  max-width: 100vw;
+  min-width: 0;
+  top: var(--drawer-top);
+  height: calc(100% - var(--drawer-top));
 }
 
-.agent-mobile-back {
+/* 自定义命令抽屉的遮罩同样让出顶栏，否则它会吃掉顶栏切换器的点击。 */
+#snippet-panel-backdrop {
+  top: var(--drawer-top);
+}
+
+.agent-header-btn,
+.panel-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.agent-header-btn:hover,
+.panel-close-btn:hover {
+  color: var(--primary);
+  background: var(--bg-hover);
+}
+
+.agent-header-btn .material-symbols-outlined:not(.agent-mobile-back),
+.panel-close-btn .material-symbols-outlined {
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  display: block;
+}
+
+.agent-mobile-back,
+.agent-header-btn .agent-mobile-back {
   display: none;
+}
+
+.agent-desktop-close,
+.agent-header-btn .agent-desktop-close {
+  display: block;
 }
 
 /* ========== Agent Markdown Content (themed) ==========
@@ -1873,6 +2854,17 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   line-height: 1.6;
   color: var(--agent-agent-color);
   font-size: 13px;
+}
+
+/* Agent message role icon wrapper - aligns icon with the first line of text */
+.agent-role-icon-wrapper {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 21px;
+  flex-shrink: 0;
+  line-height: 1;
 }
 
 /* Headings */
@@ -1887,8 +2879,11 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   line-height: 1.3;
   margin: 12px 0 6px;
 }
-.agent-md-content > :is(h1, h2, h3, h4, h5, h6):first-child {
+.agent-md-content > :first-child {
   margin-top: 0;
+}
+.agent-md-content > :last-child {
+  margin-bottom: 0;
 }
 .agent-md-content h1 {
   font-size: 18px;
@@ -2184,6 +3179,164 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   box-shadow: none;
 }
 
+/* Agent stop button modifier */
+.agent-send-btn.is-stopping {
+  background: var(--error);
+  color: #fff;
+}
+
+.agent-send-btn.is-stopping:hover {
+  background: color-mix(in srgb, var(--error) 85%, white);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--error) 40%, transparent);
+}
+
+/* Agent user message actions bar - floating toolbar outside bubble */
+.agent-user-actions {
+  position: absolute;
+  right: 100%;
+  bottom: 4px;
+  margin-right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 3px;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+  opacity: 0;
+  transform: translateX(4px);
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+  pointer-events: none;
+  z-index: 5;
+  white-space: nowrap;
+}
+
+.agent-user-container:hover .agent-user-actions,
+.agent-user-container:focus-within .agent-user-actions,
+.agent-user-bubble:hover .agent-user-actions,
+.agent-user-bubble:focus-within .agent-user-actions {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+/* Touch devices (coarse pointer) keep actions accessible */
+@media (pointer: coarse) {
+  .agent-user-actions {
+    opacity: 0.75;
+    transform: translateX(0);
+    pointer-events: auto;
+  }
+}
+
+.agent-user-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.agent-user-action-btn:hover {
+  color: var(--on-surface);
+  background: color-mix(in srgb, var(--on-surface) 12%, transparent);
+}
+
+.agent-aborted-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+  color: var(--error);
+  border: 1px solid color-mix(in srgb, var(--error) 25%, transparent);
+}
+
+/* Agent inline edit card (ChatGPT style) */
+.agent-inline-edit-card {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.agent-inline-edit-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.agent-inline-edit-textarea {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--on-surface);
+  font-family: inherit;
+  min-height: 44px;
+  max-height: 240px;
+}
+
+.agent-inline-cancel-btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  border-radius: 9999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.agent-inline-cancel-btn:hover {
+  color: var(--on-surface);
+  background: var(--bg-hover);
+}
+
+.agent-inline-send-btn {
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 9999px;
+  border: none;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.agent-inline-send-btn:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.agent-inline-send-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.agent-inline-send-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* Streaming cursor — blinking block appended to streamed text */
 @keyframes agent-blink {
   0%,
@@ -2429,6 +3582,11 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
     display: flex;
   }
 
+  /* 移动端抽屉自行占满可视高度，无需为顶栏让位 */
+  :root {
+    --drawer-top: 0px;
+  }
+
   #auth-section {
     min-height: var(--visual-viewport-height);
     padding: max(16px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right))
@@ -2495,6 +3653,10 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
 
   .user-space-header-actions.is-open {
     display: flex;
+  }
+
+  .theme-segmented-wrapper {
+    display: none;
   }
 
   .user-space-header-actions .theme-selector,
@@ -2701,6 +3863,15 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
     background: var(--accent-bg);
   }
 
+  /* .hidden 必须能盖住上面 .mobile-more-menu > button 的 display: flex：
+     该规则特异性为 (0,1,1)，而 Tailwind 的 .hidden 仅为 (0,1,0)，
+     因此过去在菜单按钮上加 hidden 完全无效 —— 曾导致一次性分享会话仍显示
+     「自定义命令」入口（违反 AGENTS.md #24），以及移动端 AI Agent 入口在
+     匿名模式下泄露。 */
+  .mobile-more-menu > button.hidden {
+    display: none;
+  }
+
   .mobile-more-theme-row {
     flex-direction: column;
     align-items: stretch;
@@ -2875,7 +4046,16 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
     padding: 0 8px;
   }
 
-  .agent-mobile-back {
+  .agent-header-btn.agent-close-button {
+    width: auto;
+    height: auto;
+    min-height: 40px;
+    padding: 0 8px;
+    gap: 6px;
+  }
+
+  .agent-mobile-back,
+  .agent-header-btn .agent-mobile-back {
     display: inline-flex;
   }
 
@@ -2884,7 +4064,8 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
     font-weight: 600;
   }
 
-  .agent-desktop-close {
+  .agent-desktop-close,
+  .agent-header-btn .agent-desktop-close {
     display: none;
   }
 
@@ -2922,6 +4103,16 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   #sftp-panel {
     width: 100vw !important;
     height: var(--visual-viewport-height) !important;
+  }
+
+  /* 自定义命令抽屉此前缺少移动端规则，在触屏平板下会按桌面公式停在 420px，
+     与同为非 Agent 抽屉的 SFTP 不一致；此处对齐 SFTP 的全视口行为。
+     内联宽度已移除，故无需 !important 即可生效。 */
+  #snippet-panel {
+    width: 100vw;
+    max-width: 100vw;
+    height: var(--visual-viewport-height);
+    border-left: 0;
   }
 
   .sftp-panel-toolbar {
@@ -3030,7 +4221,8 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
 
 .remote-editor::backdrop {
   background: var(--modal-overlay);
-  backdrop-filter: blur(var(--surface-blur));
+  -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
+  backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
   animation: app-dialog-backdrop-in var(--motion-normal) ease-out;
 }
 

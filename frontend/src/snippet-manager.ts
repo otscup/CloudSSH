@@ -35,6 +35,8 @@ export interface SnippetManagerDeps {
   getTerminal: () => SSHTerminal | null;
   /** 是否已登录（决定云端/本地存储后端）。 */
   isAuthenticated: () => boolean;
+  /** 抽屉展开/收起状态变更通知 */
+  onStateChange?: () => void;
 }
 
 export const PANEL_ID = 'snippet-panel';
@@ -133,6 +135,7 @@ export class SnippetManager {
     this.visible = true;
     this.backdropElement.classList.remove('opacity-0', 'pointer-events-none');
     this.panelContainer.style.transform = 'translateX(0)';
+    this.deps.onStateChange?.();
 
     this.updateStorageBadge();
     await this.reload();
@@ -151,6 +154,7 @@ export class SnippetManager {
     this.visible = false;
     this.backdropElement.classList.add('opacity-0', 'pointer-events-none');
     this.panelContainer.style.transform = 'translateX(100%)';
+    this.deps.onStateChange?.();
 
     this.searchQuery = '';
     const searchInput = document.getElementById('snippet-search-input') as HTMLInputElement | null;
@@ -159,6 +163,10 @@ export class SnippetManager {
     if (clearBtn) clearBtn.classList.add('hidden');
 
     this.collapseForm();
+  }
+
+  isOpen(): boolean {
+    return this.visible;
   }
 
   toggle(): void {
@@ -215,7 +223,6 @@ export class SnippetManager {
       'fixed top-0 right-0 h-full z-[96] flex flex-col bg-surface border-l border-outline-variant shadow-2xl transition-transform duration-300 ease-in-out text-on-surface'
     );
     panel.id = PANEL_ID;
-    panel.style.width = 'min(clamp(440px, 45vw, 680px), 100vw)';
     panel.style.transform = 'translateX(100%)';
     this.panelContainer = panel;
 
@@ -290,7 +297,7 @@ export class SnippetManager {
 
     const closeBtn = createElement(
       'button',
-      'hover:opacity-80 transition-opacity cursor-pointer p-1 text-on-surface-variant'
+      'panel-close-btn'
     );
     closeBtn.id = 'snippet-close-btn';
     closeBtn.type = 'button';
@@ -312,26 +319,28 @@ export class SnippetManager {
     // 搜索输入框
     const searchWrapper = createElement(
       'div',
-      'flex-1 relative flex items-center min-w-0 h-[30px] rounded border border-outline-variant bg-surface-variant/20 focus-within:border-primary-container'
+      'flex-1 relative flex items-center min-w-0'
     );
-    const searchIcon = createIcon('search', '15px');
-    searchIcon.className =
-      'material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none select-none';
-    searchWrapper.appendChild(searchIcon);
 
     const searchInput = createElement(
       'input',
-      'w-full h-full bg-transparent text-[12px] outline-none terminal-input border-0 font-ui'
+      'terminal-input w-full h-[30px] text-[12px] outline-none font-ui'
     );
     searchInput.id = 'snippet-search-input';
     searchInput.type = 'search';
     searchInput.placeholder = t('snippets.searchPlaceholder');
-    searchInput.style.paddingLeft = '32px';
+    searchInput.style.paddingLeft = '30px';
     searchInput.style.paddingRight = '28px';
+    searchWrapper.appendChild(searchInput);
+
+    const searchIcon = createIcon('search', '15px');
+    searchIcon.className =
+      'material-symbols-outlined absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none select-none z-10';
+    searchWrapper.appendChild(searchIcon);
 
     const clearBtn = createElement(
       'button',
-      'absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary p-0.5 cursor-pointer hidden'
+      'absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-primary p-0.5 cursor-pointer hidden z-10'
     );
     clearBtn.id = 'snippet-search-clear-btn';
     clearBtn.type = 'button';
@@ -352,7 +361,6 @@ export class SnippetManager {
       clearBtn.classList.toggle('hidden', !searchInput.value.trim());
       this.renderList();
     });
-    searchWrapper.appendChild(searchInput);
     toolbar.appendChild(searchWrapper);
 
     // “新建片段” 按钮

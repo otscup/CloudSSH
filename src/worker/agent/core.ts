@@ -1,11 +1,14 @@
 // Agent Core — control loop that runs inside Durable Object
 
 import {
+  CONSECUTIVE_TASK_WINDOW_MS,
   extractDistillationJson,
   type KnowledgeAction,
   normalizeKnowledgeInput,
   normalizeWorkLogInput,
   type UnifiedServerMemory,
+  WORK_LOG_SUMMARY_MAX_LENGTH,
+  WORK_LOG_TITLE_MAX_LENGTH,
   type WorkLogMode,
 } from '../../server-memory-schema';
 import {
@@ -89,7 +92,8 @@ export class AgentCore {
     }>,
     private askConfirmation: (command: string, reason: string) => Promise<boolean>,
     config?: Partial<AgentConfig>,
-    private memoryProvider?: AgentMemoryProvider
+    private memoryProvider?: AgentMemoryProvider,
+    private waitUntil?: (promise: Promise<unknown>) => void
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.toolExecutor = new ToolExecutor(
@@ -174,7 +178,8 @@ export class AgentCore {
     userId: string,
     userMessage: string,
     locale: AgentLocale = 'zh-CN',
-    timezone?: string
+    timezone?: string,
+    userIndex?: number
   ): Promise<void> {
     this.preferredLocale = locale;
     if (timezone && typeof timezone === 'string' && timezone.length <= 64) {
@@ -184,6 +189,29 @@ export class AgentCore {
     if (this.loopTimeout) {
       clearTimeout(this.loopTimeout);
       this.loopTimeout = null;
+    }
+
+    // 若已有运行中的任务，抢占式中止旧任务，防止并发通道竞争与 Token 浪费
+    if (this.state.status === 'running') {
+      this.agentAbort('superseded');
+    }
+
+    if (typeof userIndex === 'number' && userIndex >= 0) {
+      // 截断目标用户消息及其后续所有消息（原地编辑重写）
+      let currentUserCount = 0;
+      let targetIndex = -1;
+      for (let i = 0; i < this.state.messages.length; i++) {
+        if (this.state.messages[i].role === 'user') {
+          if (currentUserCount === userIndex) {
+            targetIndex = i;
+            break;
+          }
+          currentUserCount++;
+        }
+      }
+      if (targetIndex !== -1) {
+        this.state.messages = this.state.messages.slice(0, targetIndex);
+      }
     }
 
     // 判断是否为新会话（首次启动或状态已重置）
@@ -270,17 +298,24 @@ export class AgentCore {
     }
   }
 
-  agentAbort(): void {
+  agentAbort(reason: string = 'connection_closed'): void {
     this.pendingDistillationSnapshot = null;
     if (this.state.status === 'running') {
-      this.abortController.abort('user_stop');
-      this.sendToFrontend({
-        type: 'agent_frame',
-        subType: 'response',
-        content: 'Agent 已停止。',
-      });
+      this.abortController.abort(reason);
       this.state.status = 'idle';
     }
+  }
+
+  resetSession(): void {
+    this.agentAbort('reset');
+    this.state = { status: 'idle', messages: [], iteration: 0 };
+    this.terminalContextSnapshot = '';
+    this.environmentContext = '';
+    this.progress = {
+      uniqueCommands: new Set(),
+      recentToolCalls: [],
+      extensionUsed: 0,
+    };
   }
 
   private async runLoop(): Promise<void> {
@@ -299,6 +334,9 @@ export class AgentCore {
       recentToolCalls: [],
       extensionUsed: 0,
     };
+
+    let truncationContinuations = 0;
+    const MAX_TRUNCATION_CONTINUATIONS = 2;
 
     try {
       while (true) {
@@ -363,6 +401,7 @@ export class AgentCore {
 
         // If LLM has tool_calls -> execute tools
         if (choice.message.tool_calls && choice.message.tool_calls.length > 0) {
+          truncationContinuations = 0; // 重置截断自动接续计数器
           // Add assistant message with tool_calls to history
           this.state.messages.push({
             role: 'assistant',
@@ -407,6 +446,43 @@ export class AgentCore {
           continue;
         }
 
+        // 检查是否因达到单次 max_tokens 截断且未产生工具调用 (finish_reason === 'length')
+        if (choice.finish_reason === 'length' && truncationContinuations < MAX_TRUNCATION_CONTINUATIONS) {
+          truncationContinuations++;
+
+          // 严格保持角色交替（适配 Claude/OpenAI 兼容代理）
+          const assistantPlaceholder =
+            choice.message.content?.trim() ||
+            (this.preferredLocale === 'en-US'
+              ? '[Reasoning reached single-turn token limit, proceeding to action]'
+              : '[推导达到单次 Token 限制，继续执行下一步]');
+
+          this.state.messages.push({
+            role: 'assistant',
+            content: assistantPlaceholder,
+          });
+
+          // 通知前端：大模型推理达到单次上限，正在内部自动续跑推进任务
+          this.sendToFrontend({
+            type: 'agent_frame',
+            subType: 'thinking',
+            iteration: this.state.iteration,
+          });
+
+          const continuePrompt =
+            this.preferredLocale === 'en-US'
+              ? 'The previous step reached the single-turn token limit. Please directly invoke the necessary tool(s) (e.g. execute_command) to execute the next action or provide the concise final conclusion now, without lengthy internal monologue.'
+              : '上一步推导达到单次 Token 上限。请直接调用相应的运维工具（如 execute_command）执行操作或简明给出最终结论，避免冗长思考。';
+
+          this.state.messages.push({
+            role: 'user',
+            content: continuePrompt,
+          });
+
+          this.resetTimeout();
+          continue;
+        }
+
         // No tool_calls -> 模型直接以文本形式回复，保存 assistant 响应到历史，并确保前端收到最终回复
         const finalContent = choice.message.content?.trim();
         if (finalContent) {
@@ -418,40 +494,82 @@ export class AgentCore {
             });
           }
         } else {
-          // 极端异常兜底：模型返回空内容时给出明确提示，防止前端悬空或静默无输出
+          // 兜底提示：若因多次达到 Token 上限截断且未生成内容，明确提示拆分任务，避免误报“任务已完成”
+          const fallbackText =
+            choice.finish_reason === 'length'
+              ? (this.preferredLocale === 'en-US'
+                  ? 'Task reasoning repeatedly reached the token limit. Please consider breaking down the task into smaller steps.'
+                  : '任务分析连续超出单次 Token 上限。建议将复杂任务拆解为小步骤逐步执行。')
+              : (this.preferredLocale === 'en-US' ? 'Task completed.' : '任务已执行完成。');
+
           this.sendToFrontend({
             type: 'agent_frame',
             subType: 'response',
-            content: this.preferredLocale === 'en-US' ? 'Task completed.' : '任务已执行完成。',
+            content: fallbackText,
           });
         }
 
         this.state.messages.push({
           role: 'assistant',
-          content: choice.message.content || (this.preferredLocale === 'en-US' ? 'Task completed.' : '任务已执行完成。'),
+          content:
+            choice.message.content ||
+            (choice.finish_reason === 'length'
+              ? (this.preferredLocale === 'en-US'
+                  ? 'Task reasoning repeatedly reached the token limit. Please consider breaking down the task into smaller steps.'
+                  : '任务分析连续超出单次 Token 上限。建议将复杂任务拆解为小步骤逐步执行。')
+              : (this.preferredLocale === 'en-US' ? 'Task completed.' : '任务已执行完成。')),
         });
         this.state.status = 'idle';
         const snapshotMsgs = extractDistillationSnapshot(this.state.messages);
-        void this.triggerMemoryDistillationIfEligible(snapshotMsgs);
+        const distillPromise = this.triggerMemoryDistillationIfEligible(snapshotMsgs);
+        if (this.waitUntil) {
+          this.waitUntil(distillPromise);
+        }
         return;
       }
 
       // Loop exited — notify frontend of the reason
       if (signal.aborted) {
-        // 超时退出（排除用户手动停止，agentAbort 已自行通知）
-        if (!String(signal.reason || '').includes('user_stop')) {
+        const reasonStr = String(signal.reason || '');
+        if (reasonStr === 'user_stopped') {
+          const stopMsg =
+            this.preferredLocale === 'en-US'
+              ? 'Agent task stopped by user.'
+              : 'Agent 任务已由用户手动停止。';
           this.sendToFrontend({
             type: 'agent_frame',
             subType: 'response',
-            content: `Agent 执行超时（已运行 ${this.state.iteration} 步），已自动停止。请检查终端状态，或发送新消息继续操作。`,
+            content: stopMsg,
+          });
+        } else if (
+          reasonStr === 'superseded' ||
+          reasonStr.includes('connection_closed') ||
+          reasonStr === 'reset'
+        ) {
+          // 新任务抢占、连接断开或会话重置：无需发送超时通知
+        } else {
+          const timeoutMsg =
+            this.preferredLocale === 'en-US'
+              ? `Agent execution timed out (ran ${this.state.iteration} steps) and was automatically stopped. Please check the terminal state or send a new message.`
+              : `Agent 执行超时（已运行 ${this.state.iteration} 步），已自动停止。请检查终端状态，或发送新消息继续操作。`;
+          this.sendToFrontend({
+            type: 'agent_frame',
+            subType: 'response',
+            content: timeoutMsg,
           });
         }
       }
 
-      // 迭代上限或非用户主动停止的退出：若已有实质性命令执行，触发阶段性记忆提炼
-      if (this.state.iteration > 0 && !String(signal.reason || '').includes('user_stop')) {
+      // 迭代上限、超时或连接关闭导致的退出：若已有实质性命令执行，触发阶段性中断记忆提炼
+      const hasExecuted = this.state.iteration > 0 || this.progress.recentToolCalls.length > 0;
+      if (hasExecuted && signal.reason !== 'reset') {
         const snapshotMsgs = extractDistillationSnapshot(this.state.messages);
-        void this.triggerMemoryDistillationIfEligible(snapshotMsgs);
+        const distillPromise = this.triggerMemoryDistillationIfEligible(snapshotMsgs, {
+          interrupted: signal.aborted,
+        });
+        if (this.waitUntil) {
+          this.waitUntil(distillPromise);
+        }
       }
     } catch (e) {
       // 仅处理非 abort 异常（abort 路径已在 while 退出后处理）
@@ -572,6 +690,7 @@ export class AgentCore {
     let reasoningText = '';
     const toolCalls: Map<number, { id: string; name: string; arguments: string }> = new Map();
     let hasToolCalls = false;
+    let upstreamFinishReason: string | null = null;
 
     try {
       while (true) {
@@ -591,7 +710,11 @@ export class AgentCore {
 
           try {
             const parsed = JSON.parse(data);
-            const delta = parsed.choices?.[0]?.delta;
+            const choice = parsed.choices?.[0];
+            if (choice?.finish_reason) {
+              upstreamFinishReason = choice.finish_reason;
+            }
+            const delta = choice?.delta;
             if (!delta) continue;
 
             const reasoning = delta.reasoning_content || delta.reasoning;
@@ -646,11 +769,14 @@ export class AgentCore {
       }));
 
     const actualHasToolCalls = assembledToolCalls.length > 0;
+    const isTruncated = upstreamFinishReason === 'length';
     let streamed = false;
 
-    // 若无工具调用，且 content 为空但有 reasoning_content（如部分推理模型），回退到 reasoning
+    // 若无工具调用，且 content 为空但有 reasoning_content（如部分非标准模型），
+    // 仅在非截断 (finish_reason !== 'length') 时才允许回退到 reasoning；
+    // 若因达到 max_tokens 被截断，reasoning 仅为未完成推导草稿，严禁当作正文发送给前端，避免泄露内部思考并中断流程。
     if (!actualHasToolCalls) {
-      if (!contentText.trim() && reasoningText.trim()) {
+      if (!isTruncated && !contentText.trim() && reasoningText.trim()) {
         contentText = reasoningText;
       }
       if (contentText.trim()) {
@@ -663,6 +789,10 @@ export class AgentCore {
       }
     }
 
+    const resolvedFinishReason = actualHasToolCalls
+      ? 'tool_calls'
+      : (upstreamFinishReason || 'stop');
+
     return {
       id: '',
       choices: [
@@ -673,7 +803,7 @@ export class AgentCore {
             tool_calls: actualHasToolCalls ? assembledToolCalls : undefined,
             streamed,
           },
-          finish_reason: actualHasToolCalls ? 'tool_calls' : 'stop',
+          finish_reason: resolvedFinishReason,
         },
       ],
     };
@@ -732,8 +862,38 @@ export class AgentCore {
     return result;
   }
 
+  /**
+   * 对历史较早轮次的 tool 输出进行轻量压缩，保持单轮与多轮长任务的上下文有界。
+   * 保留最近 6 次工具交互的完整输出；更早的工具消息若超出 300 字符，保留头尾精简概要。
+   * 严格保留 tool_call_id 与消息配对结构，杜绝 API 400。
+   */
+  private compactHistoricalToolOutputs(): void {
+    const toolIndices: number[] = [];
+    for (let i = 1; i < this.state.messages.length; i++) {
+      if (this.state.messages[i].role === 'tool') {
+        toolIndices.push(i);
+      }
+    }
+
+    if (toolIndices.length <= 6) return;
+
+    const toCompactIndices = toolIndices.slice(0, -6);
+    for (const idx of toCompactIndices) {
+      const msg = this.state.messages[idx];
+      if (msg.content && msg.content.length > 300) {
+        const head = msg.content.slice(0, 200);
+        const tail = msg.content.slice(-80);
+        msg.content = `${head}\n[...更早历史执行输出已压缩...]\n${tail}`;
+      }
+    }
+  }
+
   private async trimMessages(): Promise<void> {
     const recentRoundsCount = 8; // 保留 8 轮上下文
+
+    // 1. 无论是多轮还是单轮长任务，对较早累积的 tool 消息进行轻量概要压缩，防爆上下文
+    this.compactHistoricalToolOutputs();
+
     if (this.state.messages.length <= 40) return; // 40 条以内不裁剪（工具结果已在序列化前单独截断）
 
     const conversationMsgs = this.state.messages.slice(1);
@@ -940,7 +1100,10 @@ ${conversationText}${previousSection}`;
     return null;
   }
 
-  private async triggerMemoryDistillationIfEligible(snapshotMsgs: ChatMessage[]): Promise<void> {
+  private async triggerMemoryDistillationIfEligible(
+    snapshotMsgs: ChatMessage[],
+    options?: { interrupted?: boolean }
+  ): Promise<void> {
     if (!this.memoryProvider || snapshotMsgs.length < 2 || shouldBypassDistillation(snapshotMsgs)) {
       return;
     }
@@ -951,7 +1114,7 @@ ${conversationText}${previousSection}`;
     }
     this.distillationInProgress = true;
     try {
-      await this.distillMemoryWithLLM(snapshotMsgs);
+      await this.distillMemoryWithLLM(snapshotMsgs, options);
     } catch {
       // 提炼失败不得影响正常交互
     } finally {
@@ -959,12 +1122,18 @@ ${conversationText}${previousSection}`;
       if (this.pendingDistillationSnapshot) {
         const nextSnapshot = this.pendingDistillationSnapshot;
         this.pendingDistillationSnapshot = null;
-        void this.triggerMemoryDistillationIfEligible(nextSnapshot);
+        const nextPromise = this.triggerMemoryDistillationIfEligible(nextSnapshot, options);
+        if (this.waitUntil) {
+          this.waitUntil(nextPromise);
+        }
       }
     }
   }
 
-  private async distillMemoryWithLLM(snapshotMsgs: ChatMessage[]): Promise<void> {
+  private async distillMemoryWithLLM(
+    snapshotMsgs: ChatMessage[],
+    options?: { interrupted?: boolean }
+  ): Promise<void> {
     try {
       const config = this.agentConfig;
       if (!config || !this.memoryProvider) return;
@@ -973,7 +1142,7 @@ ${conversationText}${previousSection}`;
       const isRecentConsecutive = Boolean(
         latestLog &&
           typeof latestLog.updated_at === 'number' &&
-          Date.now() - latestLog.updated_at < 30 * 60 * 1000
+          Date.now() - latestLog.updated_at < CONSECUTIVE_TASK_WINDOW_MS
       );
 
       // 选取刚才同步快照的消息，并融合已有的近期 WorkLog 与 Knowledge 键值清单
@@ -1018,7 +1187,10 @@ ${conversationText}${previousSection}`;
         return;
       }
 
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.warn(`Memory distillation HTTP error: ${res.status}`);
+        return;
+      }
 
       const data = await res.json<{ choices: Array<{ message: { content: string } }> }>();
       const rawContent = data.choices?.[0]?.message?.content?.trim();
@@ -1026,6 +1198,7 @@ ${conversationText}${previousSection}`;
 
       const parsed = extractDistillationJson(rawContent);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        console.warn('Memory distillation JSON extraction returned non-object or null');
         return;
       }
 
@@ -1037,14 +1210,44 @@ ${conversationText}${previousSection}`;
           desiredMode = 'update_latest';
         }
 
-        const normLog = normalizeWorkLogInput({
-          mode: desiredMode,
-          title: parsed.workLog.title,
-          summary: parsed.workLog.summary,
-        });
+        const normLog = normalizeWorkLogInput(
+          {
+            mode: desiredMode,
+            title: parsed.workLog.title,
+            summary: parsed.workLog.summary,
+          },
+          { truncate: true }
+        );
         if (normLog.ok) {
           workLogToSave = normLog.value;
+          if (options?.interrupted && workLogToSave) {
+            const prefix = this.preferredLocale === 'en-US' ? '[Interrupted] ' : '[已中断] ';
+            if (
+              !workLogToSave.title.startsWith(prefix) &&
+              !workLogToSave.title.startsWith('[已中断]') &&
+              !workLogToSave.title.startsWith('[Interrupted]')
+            ) {
+              workLogToSave.title = `${prefix}${workLogToSave.title}`.slice(
+                0,
+                WORK_LOG_TITLE_MAX_LENGTH
+              );
+            }
+          }
         }
+      } else if (options?.interrupted && snapshotMsgs.length >= 2) {
+        // 模型未返回 workLog 时，针对中断会话合成基础留痕，确保断线不丢失上下文
+        const userMsg = snapshotMsgs.find((m) => m.role === 'user')?.content || '运维任务';
+        const truncatedUserMsg = userMsg.slice(0, 30);
+        const prefix = this.preferredLocale === 'en-US' ? '[Interrupted] ' : '[已中断] ';
+        const summary =
+          this.preferredLocale === 'en-US'
+            ? `Task was interrupted after step ${this.state.iteration}.`
+            : `任务在执行第 ${this.state.iteration} 步时被中断或网络断开。`;
+        workLogToSave = {
+          mode: 'create',
+          title: `${prefix}${truncatedUserMsg}`.slice(0, WORK_LOG_TITLE_MAX_LENGTH),
+          summary: summary.slice(0, WORK_LOG_SUMMARY_MAX_LENGTH),
+        };
       }
 
       const knowledgeToSave: Array<{
@@ -1055,12 +1258,15 @@ ${conversationText}${previousSection}`;
       }> = [];
       if (Array.isArray(parsed.knowledge)) {
         for (const k of parsed.knowledge) {
-          const normK = normalizeKnowledgeInput({
-            action: k.action,
-            category: k.category,
-            key: k.key,
-            value: k.value,
-          });
+          const normK = normalizeKnowledgeInput(
+            {
+              action: k.action,
+              category: k.category,
+              key: k.key,
+              value: k.value,
+            },
+            { truncate: true }
+          );
           if (normK.ok) {
             knowledgeToSave.push(normK.value);
           }
@@ -1080,8 +1286,8 @@ ${conversationText}${previousSection}`;
           subType: 'memory_updated',
         });
       }
-    } catch {
-      // 提炼失败静默忽略
+    } catch (e) {
+      console.warn('Memory distillation failed:', e instanceof Error ? e.message : String(e));
     }
   }
 }

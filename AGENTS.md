@@ -31,6 +31,7 @@ src/
 │   ├── durable-object.ts  # SSHSessionDO - manages SSH sessions
 │   ├── share-do.ts    # SSHShareDO - one-time capability lifecycle and share-only audit log
 │   ├── ssh-session.ts     # SSH session logic, multi-channel routing, SFTP handling
+│   ├── idle-timeout.ts   # 用户无操作空闲超时解析（IDLE_TIMEOUT 环境变量与默认 30 分钟策略）
 │   ├── ssh-interactive-auth.ts # RFC 4256 键盘交互认证状态机（挑战/超时/响应组包解耦）
 │   ├── ssh-detached-buffer.ts   # 弱网断线保持 128KB 有界缓冲队列与重连补偿
 │   ├── share-audit-writer.ts    # 分享审计事件投递、防抖刷新与关闭留痕
@@ -67,7 +68,7 @@ src/
 │   ├── utils.ts      # Binary utilities
 │   ├── sftp.ts       # SFTP v3 client implementation
 │   └── sftp-types.ts # SFTP protocol constants and types
-├── theme-schema.ts   # Theme V3 shared validation（外观/背景/效果/版式模块、白名单与读性遮罩下限）
+├── theme-schema.ts   # Theme V4 shared validation（外观/背景/效果/版式模块、白名单与读性遮罩下限）
 ├── snippet-schema.ts # Command snippet shared validation, limits, and normalization (UserDBDO + localStorage)
 └── types.ts          # Shared TypeScript type definitions
 
@@ -85,7 +86,7 @@ frontend/
 │   ├── os-icons.ts        # 操作系统品牌图标（内嵌 simple-icons SVG）
 │   ├── port.ts            # 端口解析与 1-65535 校验
 │   ├── regions.ts         # DO locationHint 区域选项共享数据（Auto + 白名单）
-│   ├── theme.ts           # Theme V3 内置主题、UI CSS 变量、外观预设、背景/效果合成与版式缩放
+│   ├── theme.ts           # Theme V4 内置主题、UI CSS 变量、外观预设、背景/效果合成与版式缩放
 │   ├── auth-challenge-dialog.ts # RFC 4256 multi-round authentication prompt UI
 │   ├── mobile-terminal.ts # Mobile viewport, shortcut toolbar, clipboard and landscape controller
 │   ├── mobile-input.ts    # Pure iOS IME diff and one-shot modifier helpers
@@ -110,7 +111,7 @@ frontend/
 │   ├── snippet-manager.ts # 命令片段库面板（云端/本地双后端、参数占位符录入、搜索/复制、填入/填入并执行、编辑/删除）
 │   ├── snippet-variables.ts # 命令片段 {{var}} 参数占位符提取与安全替换纯函数
 │   ├── snippet-store.ts   # 片段存储层（RemoteSnippetStore + LocalSnippetStore + 错误映射）
-│   ├── ai-config.ts       # AI model configuration modal
+│   ├── ai-config.ts       # AI model configuration modal (Combobox 下拉、免密安全拉取与主题自适应)
 │   ├── i18n/
 │   │   ├── index.ts        # 语言解析、词条查询（t）与 locale 变更通知
 │   │   └── locales/        # zh-CN.ts / en-US.ts 词条字典
@@ -215,8 +216,9 @@ Required for optional features (configured in `wrangler.toml` or Cloudflare Dash
 - `BASE_URL` - OAuth callback URL
 - `STRICT_HOST_KEY_VERIFY` - Optional; `false` skips host-key signature verification failures (default true, fails closed)
 - `DEBUG_MODE` - Optional; `true` appends debug info to API responses（wrangler.toml `[vars]` 已声明 `DEBUG_MODE`）
+- `IDLE_TIMEOUT` - Optional; user inactivity idle timeout duration (e.g. `30m`, `1h`, `1800`; defaults to `30m`; `0` disables idle timeout)
 
-> 注意：`Env` 中声明的 `MAX_CONNECTIONS` / `IDLE_TIMEOUT` 属预留变量，当前代码未读取，切勿依赖。
+> 注意：`Env` 中声明的 `MAX_CONNECTIONS` 属预留变量，当前代码未读取，切勿依赖；`IDLE_TIMEOUT` 现已生效，默认 30 分钟。
 
 ## API Routes
 
@@ -229,6 +231,12 @@ Required for optional features (configured in `wrangler.toml` or Cloudflare Dash
 | `/api/servers` | GET/POST | Yes | List or create saved servers（含 `tags` 与可选 `jump_server_id`） |
 | `/api/servers/:id` | PUT/DELETE | Yes | Update or delete a server（含标签和跳板关系校验） |
 | `/api/servers/:id/connect` | POST | Yes | Generate one-time-token, return WebSocket URL |
+| `/api/servers/:id/memory` | GET | Yes | Read unified server memory (work logs & context knowledge) |
+| `/api/servers/:id/work-logs` | POST | Yes | Create a server work log entry |
+| `/api/servers/:id/work-logs/:logId` | DELETE | Yes | Delete a server work log entry |
+| `/api/servers/:id/knowledge` | POST | Yes | Create or update a server knowledge/credential entry |
+| `/api/servers/:id/knowledge/:kId` | DELETE | Yes | Delete a server knowledge/credential entry |
+| `/api/servers/:id/knowledge/batch` | DELETE | Yes | Batch delete server knowledge/credential entries |
 | `/api/servers/:id/shares` | GET/POST | Yes | List or create one-time SSH shares for a saved server |
 | `/api/shares/:id` | DELETE | Yes | Revoke a share owned by the current user |
 | `/api/shares/:id/audit` | GET | Yes | Read the paginated audit log for an owned share |
@@ -318,7 +326,7 @@ release: 发布 vX.Y.Z <主题>版本（如 `release: 发布 v1.10.2 工作流�
 13. **SFTP selection model** - file selection supports single, Cmd/Ctrl toggle, Shift range and select-all. Batch download reuses the sequential download queue; batch delete waits for all delete/rmdir results before refreshing.
 14. **Agent terminal selection context** - “Ask AI assistant” attaches one immutable selection snapshot per tab and never sends it by itself. New selections replace the pending snapshot; successful sends and session teardown clear it. Preserve the untrusted-data/non-authorization boundary in `terminal-selection-context.ts`.
 15. **Region inference privacy** - Saving or changing a Cloudflare-direct server host calls the third-party IPinfo service and persists the inferred locationHint. Servers with `jump_server_id` are downstream nodes: never query their hosts, ignore and clear their own region hints, and infer once if they later become direct Auto entries. Keep the provider name and disclosure synchronized across README/code comments; failures must continue to fall back to Cloudflare's default placement.
-16. **Theme editor ownership** - The full visual editor and JSON export live in `docs/theme-editor/index.html` for GitHub Pages and never authenticate against CloudSSH. `scripts/sync-theme-editor.js` keeps its built-in colors, resolved appearance presets, background layers and effect presets aligned with `frontend/src/theme.ts`; the application and Worker share Theme V3 validation through `src/theme-schema.ts` (appearance enums + V3 background/effects/typography modules, all declarative and whitelist-validated). The application only imports JSON themes and synchronizes the single custom-theme slot through `/api/user/theme` for signed-in users; later imports replace the previous theme, while anonymous themes remain local. V3 effect/background layers are driven by CSS variables and data attributes only — no user CSS/JS is ever evaluated, and background gradients compose exclusively from whitelist-validated color stops.
+16. **Theme editor ownership** - The full visual editor and JSON export live in `docs/theme-editor/index.html` for GitHub Pages and never authenticate against CloudSSH. `scripts/sync-theme-editor.js` keeps its built-in colors, resolved appearance presets, background layers and effect presets aligned with `frontend/src/theme.ts`; the application and Worker share Theme V4 validation through `src/theme-schema.ts` (appearance enums + V3 background/effects/typography modules, all declarative and whitelist-validated). The application only imports JSON themes and synchronizes the single custom-theme slot through `/api/user/theme` for signed-in users; later imports replace the previous theme, while anonymous themes remain local. V3 effect/background layers are driven by CSS variables and data attributes only — no user CSS/JS is ever evaluated, and background gradients compose exclusively from whitelist-validated color stops.
 17. **Mobile terminal input and recovery** - Mobile shortcuts and the iOS keyCode 229 fallback must continue through `TrzszFilter.processTerminalInput`; never send them directly to the WebSocket, and do not permit any terminal input until `shell_ready`. For iOS IME fallback, capture the textarea baseline on `keydown=229` but flush on the corresponding `keyup` regardless of its key code, since Safari commonly reports 32 for Space and 0 for punctuation; xterm `onData` remains authoritative to prevent duplicate input. Keep the explicit mobile selection mode isolated from desktop mouse auto-copy, map touch drags through xterm's public selection API instead of native long-press selection, and debounce visual viewport refits. Enable background-return visibility recovery only when the device has touch points and a coarse primary pointer, so desktop tab changes do not emit recovery logs or probes. A mobile background return must validate the WebSocket with a bounded ID-matched heartbeat instead of trusting `readyState`; anonymous reconnects may reuse only the current in-memory config, while saved-server reconnects must request a fresh one-time token from `/api/servers/:id/connect`. Never report a connection as online before the replacement Shell is ready.
 18. **Saved-server OS detection** - Run OS detection only for signed-in saved servers without a persisted result, through a separate non-blocking SSH exec channel after Shell readiness. Never persist `unknown`; host or port changes must clear the stored OS, and background metadata updates must not change `updated_at` or server ordering. Keep backend canonical keys synchronized with frontend labels/icon fallbacks.
 19. **Keyboard-interactive authentication** - Begin user authentication with the RFC 4252 `none` probe and choose only methods advertised by the server, while retaining the bounded compatibility fallback for servers that omit the list. RFC 4256 challenges are event-driven during the SSH auth state. Keep method-specific message type 60 disambiguated by the active auth method, use `partial_success` to advance bounded multi-factor stages, and only fall back without partial success when the server no longer offers the configured primary method. Bind browser responses and `auth_challenge_ack` display acknowledgements to one random challenge ID and originating WebSocket, distinguish an undisplayed challenge from an acknowledged but unanswered challenge, never log responses, clear pending challenges on timeout/reconnect/close, require explicit user action before substituting a stored password, and close authentication timeouts normally so older frontends cannot reconnect repeatedly. Treat ordinary server-side credential rejection as an expected close rather than WebSocket error 1011.
@@ -349,6 +357,10 @@ release: 发布 vX.Y.Z <主题>版本（如 `release: 发布 v1.10.2 工作流�
 33. **标签页管理与右键上下文菜单** - 标签页支持双击内联重命名与右键上下文菜单操作（重命名、克隆会话、关闭其他标签页、关闭当前标签页）。重命名提交空字符串或空白字符时，必须重新调用 `renderTabBar()` 恢复原标签文本展示并销毁内联 `<input>`，避免输入框卡死在标签栏；右键菜单的全局 document click 监听器必须以 `capture: true` 模式挂载并在 `hideTabContextMenu()` 中统一步骤式注销，防止菜单项内部的 `stopPropagation` 阻断清理导致监听器在多轮右键操作后泄漏累积，避免失效闭包误关新菜单。已保存服务器克隆会话必须通过 `/api/servers/:id/connect` 申请独立连接令牌开新 Tab，禁止跨 Tab 复用未授权连接。
 
 34. **命令片段占位符与 SFTP 面包屑/新建文件** - 命令片段支持 `{{var}}` 动态参数占位符（由 `snippet-variables.ts` 纯函数解析），仅在检测到有效占位符时拦截执行流并弹出参数录入对话框，输入完成后安全替换并填入终端；无占位符片段保持直填/执行的原生路径。SFTP 面包屑（`parsePathBreadcrumbs`）点击空白处平滑切换为绝对路径文本输入；表头多维排序（`sortSFTPEntries`）采用稳定排序算法，目录严格置顶，大小与时间初次点击默认降序。新建空白文件必须经过既有上传队列原子写入 0 字节内容并执行重名冲突检测，成功后自动唤起 CodeMirror 在线编辑。
+
+35. **AI 模型配置与代理安全（免密拉取与防凭据外带）** - AI 配置弹窗（`frontend/src/ai-config.ts`）使用自定义 Combobox 替代原生 HTML `<datalist>`，彻底根除浏览器默认粗黑倒三角（`::-webkit-calendar-picker-indicator`）及原值前缀过滤导致下拉只显示 1 项的缺陷；支持全量下拉、即时模糊过滤、一键清空重选，文字使用 `text-on-surface`，悬停使用 `hover:bg-surface-variant hover:text-primary`，浮层增加 `!p-0`，完美自适应项目内置主题与外层圆角规范。后端 `POST /api/ai/models` 在未传入 `api_key` 时，仅当请求的 `base_url` 与数据库中已确认绑定的 `base_url` 一致时才允许自动注入已存密钥；若接口地址变更且未提供对应密钥，后端强制拒绝并返回 400（严禁将已存凭证发送至未绑定的第三方地址，杜绝凭据外带 Credential Exfiltration）；入口执行同源 Origin 校验防止 CSRF，异常返回经 `sanitizeAIErrorMessage` 进行敏感 Token/Bearer 脱敏；前端保存成功后立即清空密码输入框，避免明文长期驻留。
+
+36. **用户无操作空闲超时（Inactivity Timeout）** - 为避免挂机会话长时间消耗 Cloudflare Durable Object 的 Duration 每日配额（Free 套餐 13,000 GB-s），`SSHSession` 实现了用户级空闲超时机制，由 `env.IDLE_TIMEOUT` 配置（支持如 `30m`/`1h`，默认 30 分钟，`0` 禁用）。仅真实用户交互（终端键盘输入、窗口 resize、SFTP 文件传输、AI 任务等）会刷新活动时间戳；前端 WebSocket ping 心跳、底层 SSH keepalive 以及远端服务器被动输出（如 `top` 刷屏）绝不重置该计时器。超时后服务端主动以 `session_idle_timeout` 关闭连接（code 1000），前端识别该事件并阻止自动重连。
 
 ## Deployment Notes
 

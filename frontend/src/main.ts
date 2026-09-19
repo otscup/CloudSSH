@@ -15,10 +15,13 @@ import type { SSHHostInfo, SSHTerminal } from './terminal';
 import {
   applyBuiltInTheme,
   applyImportedTheme,
+  type BuiltInThemeName,
   isBuiltInTheme,
   normalizeImportedTheme,
   THEME_MAX_BYTES,
 } from './theme';
+import { LiquidSegmentedThemeControl } from './theme-segmented';
+import { LiquidSegmentedDrawerControl } from './drawer-segmented';
 import { notify } from './ui-feedback';
 
 // ==================== 全局状态 ====================
@@ -34,6 +37,7 @@ const mobileTerminalController = new MobileTerminalController(
 const snippetManager = new SnippetManager({
   getTerminal: () => tabManager?.getActiveTab()?.terminal ?? null,
   isAuthenticated: () => isLoggedIn && !sharedSessionMode,
+  onStateChange: () => syncDrawerSegmentedControl(),
 });
 
 function setUserSpaceMenuOpen(open: boolean): void {
@@ -139,6 +143,9 @@ function activateTerminalView(): void {
   document.getElementById('terminal-section')!.classList.remove('hidden');
   document.getElementById('terminal-section')!.classList.add('flex');
   document.body.classList.add('terminal-active');
+  requestAnimationFrame(() => {
+    terminalDrawerControl?.refresh();
+  });
 }
 
 function showTerminalSection(): void {
@@ -264,9 +271,13 @@ function showUserSpace(user: {
   document.getElementById('auth-section')!.classList.add('hidden');
   document.getElementById('user-space-section')!.classList.remove('hidden');
   document.getElementById('user-space-section')!.classList.add('flex');
+  requestAnimationFrame(() => {
+    userThemeSegmentedControl?.refresh();
+  });
 
   // Show agent toggle button for logged-in users
   document.getElementById('agent-toggle-btn')?.classList.remove('hidden');
+  document.getElementById('mobile-agent-btn')?.classList.remove('hidden');
 
   serverList = new ServerList(
     user,
@@ -296,6 +307,9 @@ function showConnectionPage(): void {
     deactivateTerminalView();
     document.getElementById('user-space-section')!.classList.remove('hidden');
     document.getElementById('user-space-section')!.classList.add('flex');
+    requestAnimationFrame(() => {
+      userThemeSegmentedControl?.refresh();
+    });
   } else {
     showAuthSection();
   }
@@ -378,6 +392,7 @@ function showSharedTerminal(claim: ClaimedShare): void {
   sharedSessionMode = true;
   isLoggedIn = false;
   document.getElementById('agent-toggle-btn')?.classList.add('hidden');
+  document.getElementById('mobile-agent-btn')?.classList.add('hidden');
   document.getElementById('snippet-toggle-btn')?.classList.add('hidden');
   document.getElementById('mobile-snippets-btn')?.classList.add('hidden');
   const tabBar = document.getElementById('tab-bar');
@@ -424,41 +439,113 @@ document.getElementById('disconnect-btn')?.addEventListener('click', () => {
   tm.closeActiveTab();
 });
 
-// ==================== 命令片段库 ====================
+// ==================== 抽屉分段控制条与互斥联动 ====================
 
-function toggleSnippetManager(): void {
-  snippetManager.toggle();
+let terminalDrawerControl: LiquidSegmentedDrawerControl | null = null;
+
+function syncDrawerSegmentedControl(): void {
+  const tab = tabManager?.getActiveTab();
+  if (snippetManager.isOpen()) {
+    terminalDrawerControl?.setActive('snippet');
+  } else if (tab?.sftpPanel?.isVisible()) {
+    terminalDrawerControl?.setActive('sftp');
+  } else if (tab?.agentPanel?.isOpen) {
+    terminalDrawerControl?.setActive('agent');
+  } else {
+    terminalDrawerControl?.setActive(null);
+  }
 }
 
-document.getElementById('snippet-toggle-btn')?.addEventListener('click', toggleSnippetManager);
+/**
+ * 抽屉互斥开关的唯一入口（桌面分段条与移动端菜单按钮共用）。
+ * 返回是否真的发生了状态变化（SFTP 未就绪 / Agent 不可用时为 false）。
+ */
+function applyDrawerToggle(drawer: 'sftp' | 'snippet' | 'agent', open: boolean): boolean {
+  const tab = tabManager?.getActiveTab();
+  if (drawer === 'sftp') {
+    if (open) {
+      // SFTP 面板由 TabManager 的 sessionReady 回调初始化，未就绪时不可打开
+      if (!tab?.sftpPanel) return false;
+      snippetManager.close();
+      tab.agentPanel?.hide();
+      tab.sftpPanel.show();
+    } else {
+      tab?.sftpPanel?.hide();
+    }
+  } else if (drawer === 'snippet') {
+    if (open) {
+      tab?.sftpPanel?.hide();
+      tab?.agentPanel?.hide();
+      void snippetManager.open();
+    } else {
+      snippetManager.close();
+    }
+  } else {
+    if (open) {
+      if (!tab?.agentPanel) return false;
+      tab.sftpPanel?.hide();
+      snippetManager.close();
+      tab.agentPanel.show();
+    } else {
+      tab?.agentPanel?.hide();
+    }
+  }
+  syncDrawerSegmentedControl();
+  return true;
+}
+
+function initTerminalDrawerControl(): void {
+  const drawerBar = document.getElementById('terminal-drawer-segmented-bar');
+  if (!drawerBar) return;
+
+  terminalDrawerControl = new LiquidSegmentedDrawerControl(drawerBar, (drawer, open) => {
+    if (!applyDrawerToggle(drawer as 'sftp' | 'snippet' | 'agent', open)) {
+      // 抽屉不可用：回退透镜的激活态
+      terminalDrawerControl?.setActive(null);
+    }
+  });
+}
+
+/**
+ * 移动端抽屉入口（#mobile-more-menu 内的 SFTP / AI Agent）。
+ * 分段切换器在移动端整体隐藏（.desktop-terminal-action），因此这两个抽屉
+ * 必须在移动端菜单里保留平行入口，否则移动端用户将无法使用 SFTP 与 AI 助手。
+ */
+function initMobileDrawerButtons(): void {
+  const closeMenu = () => mobileTerminalController.hideMoreMenu();
+
+  document.getElementById('mobile-sftp-btn')?.addEventListener('click', () => {
+    const tab = tabManager?.getActiveTab();
+    applyDrawerToggle('sftp', !(tab?.sftpPanel?.isVisible() ?? false));
+    closeMenu();
+  });
+
+  document.getElementById('mobile-agent-btn')?.addEventListener('click', () => {
+    const tab = tabManager?.getActiveTab();
+    applyDrawerToggle('agent', !(tab?.agentPanel?.isOpen ?? false));
+    closeMenu();
+  });
+}
+
+// 移动端命令片段按钮
+function toggleSnippetManager(): void {
+  const tab = tabManager?.getActiveTab();
+  if (!snippetManager.isOpen()) {
+    tab?.sftpPanel?.hide();
+    tab?.agentPanel?.hide();
+  }
+  snippetManager.toggle();
+  syncDrawerSegmentedControl();
+}
+
 document.getElementById('mobile-snippets-btn')?.addEventListener('click', toggleSnippetManager);
 
-// ==================== SFTP 面板 ====================
-
-document.getElementById('sftp-toggle-btn')?.addEventListener('click', () => {
-  const tab = tabManager?.getActiveTab();
-  if (!tab) return;
-
-  if (!tab.sftpPanel) {
-    // SFTP 面板由 TabManager 的 sessionReady 回调初始化
-    // 如果还没有初始化，说明 SSH 还没就绪
-    return;
-  }
-  tab.sftpPanel.toggle();
-});
-
-// ==================== AI Agent 面板 ====================
+// ==================== AI Agent 面板设置 ====================
 
 const aiConfigPanel = new AIConfigPanel();
 
 document.getElementById('ai-config-btn')?.addEventListener('click', () => {
   aiConfigPanel.show();
-});
-
-document.getElementById('agent-toggle-btn')?.addEventListener('click', () => {
-  const tab = tabManager?.getActiveTab();
-  if (!tab?.agentPanel) return;
-  tab.agentPanel.toggle();
 });
 
 const askAISelectionButton = document.getElementById('ask-ai-selection-btn');
@@ -486,6 +573,7 @@ document.getElementById('export-btn')?.addEventListener('click', () => {
 
 const CUSTOM_THEME_VALUE = '__custom__';
 let themeSelectionRevision = 0;
+let userThemeSegmentedControl: LiquidSegmentedThemeControl | null = null;
 const themeSelectors = Array.from(
   document.querySelectorAll<HTMLSelectElement>('[data-theme-selector]')
 );
@@ -522,12 +610,14 @@ function ensureCustomOption(): void {
     }
     option.textContent = t('theme.custom');
   }
+  userThemeSegmentedControl?.ensureCustomButton();
 }
 
 function syncThemeSelectors(value: string): void {
   for (const selector of themeSelectors) {
     selector.value = value;
   }
+  userThemeSegmentedControl?.syncFromSelect(value, true);
 }
 
 // ==================== 主题导入 ====================
@@ -578,16 +668,25 @@ importThemeInput?.addEventListener('change', (e) => {
 
 // ==================== 主题恢复 ====================
 
+const LEGACY_THEME_MIGRATION: Record<string, BuiltInThemeName> = {
+  glacier: 'standard-dark',
+  apple: 'liquid-glass',
+  gruvbox: 'standard-dark',
+  crt: 'cyberpunk',
+  glass: 'liquid-glass',
+};
+
 /** 恢复主题（在 init 时调用，此时还没有终端实例，只设置 UI 变量） */
 function restoreTheme(): void {
   const selection = localStorage.getItem('cloudssh_theme_selection');
   localStorage.removeItem('cloudssh_theme');
 
-  // glacier 内置主题已被 Apple 主题取代：旧选择一次性迁移到同为深色的 Standard Dark
-  if (selection === 'glacier') {
-    localStorage.setItem('cloudssh_theme_selection', 'standard-dark');
-    applyBuiltInTheme('standard-dark');
-    syncThemeSelectors('standard-dark');
+  // 旧版内置主题平滑迁移到当前最契合的内置主题
+  if (selection && selection in LEGACY_THEME_MIGRATION) {
+    const migrated = LEGACY_THEME_MIGRATION[selection];
+    localStorage.setItem('cloudssh_theme_selection', migrated);
+    applyBuiltInTheme(migrated);
+    syncThemeSelectors(migrated);
     return;
   }
 
@@ -674,11 +773,93 @@ async function restoreCloudTheme(
 
 // ==================== 初始化 ====================
 
+/**
+ * macOS 26 液态玻璃动态指针天光追踪：
+ * 仅在 liquid 风格下监听 pointermove 并通过 requestAnimationFrame 节流更新 --mx 和 --my，
+ * 纯变量传导，零 DOM 重排，GPU 仅更新 radial-gradient 聚光位置。
+ */
+function initPointerSpecularTracking(): void {
+  let rafId: number | null = null;
+  let targetCard: HTMLElement | null = null;
+  let px = 50;
+  let py = 0;
+
+  document.addEventListener(
+    'pointermove',
+    (e: PointerEvent) => {
+      if (document.documentElement.dataset.uiStyle !== 'liquid') return;
+      const card = (e.target as HTMLElement | null)?.closest?.(
+        '.server-card, .cyber-box'
+      ) as HTMLElement | null;
+      if (!card) {
+        targetCard = null;
+        return;
+      }
+      const rect = card.getBoundingClientRect();
+      targetCard = card;
+      px = Math.round(((e.clientX - rect.left) / rect.width) * 100);
+      py = Math.round(((e.clientY - rect.top) / rect.height) * 100);
+
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          if (targetCard) {
+            targetCard.style.setProperty('--mx', `${px}%`);
+            targetCard.style.setProperty('--my', `${py}%`);
+          }
+          rafId = null;
+        });
+      }
+    },
+    { passive: true }
+  );
+
+  document.addEventListener(
+    'pointerleave',
+    () => {
+      if (targetCard) {
+        targetCard.style.setProperty('--mx', '50%');
+        targetCard.style.setProperty('--my', '0%');
+        targetCard = null;
+      }
+    },
+    { passive: true }
+  );
+}
+
 async function init(): Promise<void> {
   initI18n();
   initUserSpaceMobileMenu();
   initServerPaginationBreakpoints();
   bindBackToTerminalButtons();
+  initPointerSpecularTracking();
+  const userSegmentedContainer = document.getElementById('user-theme-segmented-container');
+  const userSelect = document.getElementById('user-theme-selector') as HTMLSelectElement | null;
+  if (userSegmentedContainer && userSelect) {
+    userThemeSegmentedControl = new LiquidSegmentedThemeControl(userSegmentedContainer, userSelect);
+  }
+
+  const drawerBar = document.getElementById('terminal-drawer-segmented-bar');
+  if (drawerBar) {
+    initTerminalDrawerControl();
+  }
+  initMobileDrawerButtons();
+
+  document.addEventListener('cloudssh:active-terminal-change', () => {
+    syncDrawerSegmentedControl();
+  });
+
+  document.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('#agent-close-btn, #sftp-close-btn, #snippet-close-btn')) {
+      setTimeout(() => syncDrawerSegmentedControl(), 50);
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      setTimeout(() => syncDrawerSegmentedControl(), 50);
+    }
+  });
   mobileTerminalController.start();
   onLocaleChange(() => {
     if (localStorage.getItem('cloudssh_imported_theme')) ensureCustomOption();

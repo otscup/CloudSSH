@@ -114,6 +114,7 @@
             id="user-space-header-actions"
             class="user-space-header-actions flex items-center gap-4"
           >
+            <div id="user-theme-segmented-container" class="theme-segmented-wrapper"></div>
             <select
               id="user-theme-selector"
               data-theme-selector
@@ -124,10 +125,7 @@
               <option value="standard-dark">Standard Dark</option>
               <option value="standard-light">Standard Light</option>
               <option value="cyberpunk">Cyberpunk</option>
-              <option value="apple">Apple · Soft</option>
-              <option value="gruvbox">Gruvbox · Dense</option>
-              <option value="crt">CRT Amber</option>
-              <option value="glass">Glass · Soft</option>
+              <option value="liquid-glass">Liquid Glass</option>
             </select>
             <button
               data-theme-import
@@ -402,7 +400,7 @@
 
         <!-- Footer -->
         <footer
-          class="user-space-footer px-6 py-2 flex justify-between items-center z-50 bg-elevated border-t border-outline-variant text-xs h-12"
+          class="user-space-footer px-6 py-0 flex justify-between items-center z-50 bg-elevated border-t border-outline-variant text-xs h-8"
         >
           <div
             class="user-space-footer-source text-secondary-container opacity-60"
@@ -450,13 +448,12 @@
             >
             <button
               id="modal-close-btn"
-              class="text-muted hover:text-primary transition-colors cursor-pointer"
+              class="panel-close-btn"
               data-i18n-aria-label="common.close"
               aria-label="关闭"
             >
               <span
                 class="material-symbols-outlined"
-                style="font-size: 20px"
                 aria-hidden="true"
                 >close</span
               >
@@ -729,42 +726,68 @@
               <option value="standard-dark">Standard Dark</option>
               <option value="standard-light">Standard Light</option>
               <option value="cyberpunk">Cyberpunk</option>
-              <option value="apple">Apple · Soft</option>
-              <option value="gruvbox">Gruvbox · Dense</option>
-              <option value="crt">CRT Amber</option>
-              <option value="glass">Glass · Soft</option>
+              <option value="liquid-glass">Liquid Glass</option>
             </select>
-            <button
-              id="import-theme-btn"
-              data-theme-import
-              class="desktop-terminal-action theme-toolbar-button hover:opacity-80 cursor-pointer p-1 flex items-center justify-center"
-              data-i18n-title="terminal.importTheme"
-              title="导入主题"
-            >
-              <span
-                class="material-symbols-outlined"
-                style="font-variation-settings: &quot;FILL&quot; 0"
-                >upload_file</span
-              >
-            </button>
             <input
               type="file"
               id="import-theme-input"
               accept=".json"
               class="hidden"
             />
-            <button
-              id="sftp-toggle-btn"
-              class="hover:opacity-80 transition-opacity cursor-pointer p-1 flex items-center justify-center"
-              data-i18n-title="terminal.sftp"
-              title="SFTP 文件管理器"
-            >
-              <span
-                class="material-symbols-outlined"
-                style="font-variation-settings: &quot;FILL&quot; 0"
-                >folder_open</span
+            <div id="terminal-drawer-segmented-bar" class="desktop-terminal-action drawer-segmented-bar" role="tablist" aria-label="抽屉功能切换">
+              <div class="drawer-segmented-lens"></div>
+              <button
+                id="sftp-toggle-btn"
+                type="button"
+                role="tab"
+                class="drawer-segmented-btn"
+                aria-selected="false"
+                data-drawer="sftp"
+                data-i18n-title="terminal.sftp"
+                title="SFTP 文件管理器"
               >
-            </button>
+                <span
+                  class="material-symbols-outlined drawer-btn-icon"
+                  style="font-variation-settings: &quot;FILL&quot; 0"
+                  >folder_open</span
+                >
+                <span class="drawer-btn-label" data-i18n="terminal.drawer.sftp">SFTP</span>
+              </button>
+              <button
+                id="snippet-toggle-btn"
+                type="button"
+                role="tab"
+                class="drawer-segmented-btn"
+                aria-selected="false"
+                data-drawer="snippet"
+                data-i18n-title="terminal.snippets"
+                title="Command snippets"
+              >
+                <span
+                  class="material-symbols-outlined drawer-btn-icon"
+                  style="font-variation-settings: &quot;FILL&quot; 0"
+                  >terminal</span
+                >
+                <span class="drawer-btn-label" data-i18n="terminal.drawer.snippets">自定义命令</span>
+              </button>
+              <button
+                id="agent-toggle-btn"
+                type="button"
+                role="tab"
+                class="drawer-segmented-btn hidden"
+                aria-selected="false"
+                data-drawer="agent"
+                data-i18n-title="terminal.agent"
+                title="AI Agent 助手"
+              >
+                <span
+                  class="material-symbols-outlined drawer-btn-icon"
+                  style="font-variation-settings: &quot;FILL&quot; 0"
+                  >psychology</span
+                >
+                <span class="drawer-btn-label" data-i18n="terminal.drawer.agent">Agent</span>
+              </button>
+            </div>
             <button
               id="search-btn"
               class="desktop-terminal-action hover:opacity-80 transition-opacity cursor-pointer p-1 flex items-center justify-center"
@@ -787,30 +810,6 @@
                 class="material-symbols-outlined"
                 style="font-variation-settings: &quot;FILL&quot; 0"
                 >download</span
-              >
-            </button>
-            <button
-              id="snippet-toggle-btn"
-              class="hover:opacity-80 transition-opacity cursor-pointer p-1 flex items-center justify-center"
-              data-i18n-title="terminal.snippets"
-              title="Command snippets"
-            >
-              <span
-                class="material-symbols-outlined"
-                style="font-variation-settings: &quot;FILL&quot; 0"
-                >terminal</span
-              >
-            </button>
-            <button
-              id="agent-toggle-btn"
-              class="hover:opacity-80 transition-opacity cursor-pointer p-1 flex items-center justify-center hidden"
-              data-i18n-title="terminal.agent"
-              title="AI Agent 助手"
-            >
-              <span
-                class="material-symbols-outlined"
-                style="font-variation-settings: &quot;FILL&quot; 0"
-                >psychology</span
               >
             </button>
             <button
@@ -855,10 +854,7 @@
                 <option value="standard-dark">Standard Dark</option>
                 <option value="standard-light">Standard Light</option>
                 <option value="cyberpunk">Cyberpunk</option>
-                <option value="apple">Apple · Soft</option>
-                <option value="gruvbox">Gruvbox · Dense</option>
-                <option value="crt">CRT Amber</option>
-                <option value="glass">Glass · Soft</option>
+                <option value="liquid-glass">Liquid Glass</option>
               </select>
             </label>
             <button id="mobile-search-btn" type="button">
@@ -871,15 +867,20 @@
                 >terminal</span
               ><span data-i18n="snippets.title">Command snippets</span>
             </button>
+            <button id="mobile-sftp-btn" type="button">
+              <span class="material-symbols-outlined" aria-hidden="true"
+                >folder_open</span
+              ><span data-i18n="terminal.sftp">SFTP 文件管理器</span>
+            </button>
+            <button id="mobile-agent-btn" type="button" class="hidden">
+              <span class="material-symbols-outlined" aria-hidden="true"
+                >psychology</span
+              ><span data-i18n="terminal.agent">AI Agent 助手</span>
+            </button>
             <button id="mobile-export-btn" type="button">
               <span class="material-symbols-outlined" aria-hidden="true"
                 >download</span
               ><span data-i18n="terminal.export">导出终端日志</span>
-            </button>
-            <button type="button" data-theme-import>
-              <span class="material-symbols-outlined" aria-hidden="true"
-                >upload_file</span
-              ><span data-i18n="terminal.importTheme">导入主题</span>
             </button>
             <button id="mobile-landscape-btn" type="button">
               <span class="material-symbols-outlined" aria-hidden="true"
@@ -1078,7 +1079,7 @@
 
         <!-- Footer -->
         <footer
-          class="terminal-footer px-6 py-2 flex justify-between items-center z-50 bg-elevated border-t border-outline-variant text-xs h-12 shrink-0"
+          class="terminal-footer px-6 py-0 flex justify-between items-center z-50 bg-elevated border-t border-outline-variant text-xs h-8 shrink-0"
         >
           <div class="text-secondary-container opacity-60">
             © <span id="copyright-year"></span> CLOUD_SSH_TERMINAL -

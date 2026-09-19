@@ -5,9 +5,8 @@ import { marked, type Tokens } from 'marked';
 import {
   formatTimestampWithRelative,
   isSensitiveKeyOrValue,
-  MAX_SERVER_KNOWLEDGE,
-  MAX_SERVER_WORK_LOGS,
   normalizeKnowledgeInput,
+  type ServerKnowledgeItem,
   type UnifiedServerMemory,
 } from '../../../src/server-memory-schema';
 import { copyTextToClipboard } from '../clipboard';
@@ -66,6 +65,9 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** 30 分钟断点续接窗口（与服务端 CONSECUTIVE_TASK_WINDOW_MS 连续任务合并窗口严格对齐） */
+const SESSION_DRAFT_TTL_MS = 30 * 60 * 1000;
+
 export class AgentPanel {
   private panelEl: HTMLElement | null = null;
   private messagesEl: HTMLElement | null = null;
@@ -73,6 +75,7 @@ export class AgentPanel {
   private inputEl: HTMLTextAreaElement | null = null;
   private sendBtn: HTMLElement | null = null;
   private isVisible: boolean = false;
+  private beforeShowHandler: (() => void) | null = null;
   private isAgentRunning: boolean = false;
   private isWaitingConfirmation: boolean = false;
   private wsSend: ((data: string) => void) | null = null;
@@ -102,6 +105,9 @@ export class AgentPanel {
   private isMemoryDrawerOpen: boolean = false;
   private activeMemoryTab: 'workLog' | 'knowledge' = 'workLog';
   private unifiedMemory: UnifiedServerMemory = { workLogs: [], knowledge: [] };
+  private isBatchMode: boolean = false;
+  private selectedKnowledgeIds: Set<number> = new Set();
+  private collapsedDateGroups: Set<string> = new Set(['older']);
   private memoryDrawerEl: HTMLElement | null = null;
   private memoryTabWorkLogBtn: HTMLElement | null = null;
   private memoryTabKnowledgeBtn: HTMLElement | null = null;
@@ -109,22 +115,41 @@ export class AgentPanel {
   private memoryCountEl: HTMLElement | null = null;
   private memoryAddBtn: HTMLElement | null = null;
   private memoryAddFormContainerEl: HTMLElement | null = null;
+  private memoryBatchBtn: HTMLElement | null = null;
+  private memoryBatchBarEl: HTMLElement | null = null;
+  private memorySelectedCountEl: HTMLElement | null = null;
+  private memoryBatchCancelBtn: HTMLButtonElement | null = null;
+  private memoryBatchDeleteBtn: HTMLButtonElement | null = null;
   private revealedSecretIds: Set<number> = new Set();
+  private sessionMessages: Array<{
+    role: string;
+    content: string;
+    hasTerminalSelection?: boolean;
+  }> = [];
 
   constructor(
-    private parentEl: HTMLElement,
-    private isLoggedIn: boolean,
+    private parentEl: HTMLElement = document.body,
+    private isLoggedIn: boolean = false,
     private serverId?: number
   ) {}
 
   setServerId(serverId?: number): void {
+    const prevServerId = this.serverId;
     this.serverId = serverId;
     this.revealedSecretIds.clear();
+    this.exitBatchMode();
+    if (prevServerId !== serverId) {
+      this.loadSessionDraft();
+    }
     if (this.isMemoryDrawerOpen) {
       void this.fetchServerMemory();
     } else if (this.isVisible && this.serverId) {
       void this.fetchServerMemory();
     }
+  }
+
+  setBeforeShowHandler(handler: () => void): void {
+    this.beforeShowHandler = handler;
   }
 
   setLayoutChangeHandler(handler: () => void): void {
@@ -149,82 +174,103 @@ export class AgentPanel {
     this.panelEl = document.createElement('div');
     this.panelEl.id = 'agent-panel';
     this.panelEl.className =
-      'shrink-0 border-l border-[var(--border)] flex flex-col bg-[var(--bg)] overflow-hidden h-full relative';
-    this.panelEl.style.width = 'min(clamp(420px, 40vw, 600px), 100%)';
+      'fixed top-0 right-0 h-full z-[85] flex flex-col transition-transform duration-300 ease-in-out shadow-2xl';
+    this.panelEl.style.transform = 'translateX(100%)';
     this.panelEl.style.display = 'none';
 
     // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
     this.panelEl.innerHTML = `
-      <div class="agent-panel-header flex items-center justify-between px-4 h-12 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
-        <div class="flex items-center gap-2 min-w-0">
-          <span class="material-symbols-outlined text-[var(--accent-secondary)]" style="font-size: 18px; font-variation-settings: 'FILL' 1;">smart_toy</span>
-          <span class="text-xs font-bold tracking-[0.1em] text-[var(--accent-secondary)] truncate" data-i18n="agent.title">AI Agent 助手</span>
-        </div>
-        <div class="flex items-center gap-1">
-          <button id="agent-memory-btn" class="agent-header-btn text-muted hover:text-primary transition-colors cursor-pointer p-1 rounded hover:bg-[var(--bg-hover)] flex items-center justify-center" data-i18n-title="agent.memoryTitle" title="工作备忘与记忆" aria-label="工作备忘与记忆">
-            <span class="material-symbols-outlined" style="font-size:18px;" aria-hidden="true">history_edu</span>
-          </button>
-          <button id="agent-close-btn" class="agent-close-button text-muted hover:text-primary transition-colors cursor-pointer p-1" data-i18n-title="agent.backToTerminal" data-i18n-aria-label="agent.backToTerminal" title="返回终端" aria-label="返回终端">
-            <span class="agent-mobile-back material-symbols-outlined" style="font-size:18px;" aria-hidden="true">arrow_back</span>
-            <span class="agent-mobile-back agent-back-label" data-i18n="agent.backToTerminal">返回终端</span>
-            <span class="agent-desktop-close material-symbols-outlined" style="font-size:18px;" aria-hidden="true">close</span>
-          </button>
-        </div>
-      </div>
-      <div id="agent-memory-drawer" class="agent-memory-drawer hidden flex flex-col bg-[var(--bg)] absolute inset-x-0 top-12 bottom-0 z-20 overflow-hidden">
-        <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
-          <div class="flex items-center gap-1.5 min-w-0">
-            <span class="material-symbols-outlined text-[var(--accent-secondary)]" style="font-size: 16px;">history_edu</span>
-            <span class="text-xs font-bold text-primary truncate" data-i18n="agent.memoryHeader">工作备忘与记忆</span>
-            <span id="agent-memory-count" class="text-[11px] text-muted font-code shrink-0"></span>
+      <div class="flex flex-col w-full h-full bg-[var(--bg)] border-l border-[var(--border)] text-on-surface overflow-hidden relative">
+        <div class="agent-panel-header flex items-center justify-between px-4 h-12 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="material-symbols-outlined text-[var(--accent-secondary)]" style="font-size: 18px; font-variation-settings: 'FILL' 1;">smart_toy</span>
+            <span class="text-xs font-bold tracking-[0.1em] text-[var(--accent-secondary)] truncate" data-i18n="agent.title">AI Agent 助手</span>
           </div>
-          <div class="flex items-center gap-1 shrink-0">
-            <button id="agent-memory-add-btn" type="button" class="hidden text-[11px] px-2 py-0.5 rounded border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors flex items-center gap-1 cursor-pointer">
-              <span class="material-symbols-outlined text-[13px]">add</span>
-              <span data-i18n="agent.addKnowledge">添加备忘</span>
+          <div class="flex items-center gap-1">
+            <button id="agent-new-chat-btn" class="agent-header-btn" data-i18n-title="agent.newChat" title="${t('agent.newChat')}" aria-label="${t('agent.newChat')}">
+              <span class="material-symbols-outlined" aria-hidden="true">add</span>
             </button>
-            <button id="agent-memory-close-btn" type="button" class="text-muted hover:text-primary p-1 cursor-pointer" data-i18n-title="agent.close" title="关闭">
-              <span class="material-symbols-outlined text-[16px]">close</span>
+            <button id="agent-memory-btn" class="agent-header-btn" data-i18n-title="agent.memoryTitle" title="工作备忘与记忆" aria-label="工作备忘与记忆">
+              <span class="material-symbols-outlined" aria-hidden="true">history_edu</span>
+            </button>
+            <button id="agent-close-btn" class="agent-header-btn agent-close-button" data-i18n-title="agent.backToTerminal" data-i18n-aria-label="agent.backToTerminal" title="返回终端" aria-label="返回终端">
+              <span class="agent-mobile-back material-symbols-outlined" aria-hidden="true">arrow_back</span>
+              <span class="agent-mobile-back agent-back-label" data-i18n="agent.backToTerminal">返回终端</span>
+              <span class="agent-desktop-close material-symbols-outlined" aria-hidden="true">close</span>
             </button>
           </div>
         </div>
-        <div class="flex border-b border-[var(--border)] bg-[var(--bg-elevated)]/50 shrink-0 text-xs">
-          <button id="agent-tab-work-log" type="button" class="flex-1 py-1.5 text-center font-medium border-b-2 border-[var(--accent)] text-[var(--accent)] transition-colors cursor-pointer" data-i18n="agent.tabWorkLog">工作历程</button>
-          <button id="agent-tab-knowledge" type="button" class="flex-1 py-1.5 text-center font-medium border-b-2 border-transparent text-muted hover:text-primary transition-colors cursor-pointer" data-i18n="agent.tabKnowledge">知识与凭据</button>
+        <div id="agent-memory-drawer" class="agent-memory-drawer hidden flex flex-col bg-[var(--bg)] absolute inset-x-0 top-12 bottom-0 z-20 overflow-hidden">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
+            <div class="flex items-center gap-1.5 min-w-0">
+              <span class="material-symbols-outlined text-[var(--accent-secondary)]" style="font-size: 16px;">history_edu</span>
+              <span class="text-xs font-bold text-primary truncate" data-i18n="agent.memoryHeader">工作备忘与记忆</span>
+              <span id="agent-memory-count" class="text-[11px] text-muted font-code shrink-0"></span>
+            </div>
+            <div class="flex items-center gap-1 shrink-0">
+              <button id="agent-memory-batch-btn" type="button" class="hidden text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 text-muted hover:text-primary hover:bg-[var(--bg-hover)] transition-colors flex items-center gap-1 cursor-pointer">
+                <span class="material-symbols-outlined text-[13px]">checklist</span>
+                <span id="agent-memory-batch-btn-text" data-i18n="agent.batchManage">批量管理</span>
+              </button>
+              <button id="agent-memory-add-btn" type="button" class="hidden text-[11px] px-2 py-0.5 rounded border border-[var(--accent)] text-[var(--accent)] hover:bg-[var(--accent)]/10 transition-colors flex items-center gap-1 cursor-pointer">
+                <span class="material-symbols-outlined text-[13px]">add</span>
+                <span data-i18n="agent.addKnowledge">添加备忘</span>
+              </button>
+              <button id="agent-memory-close-btn" type="button" class="panel-close-btn" data-i18n-title="agent.close" title="关闭">
+                <span class="material-symbols-outlined">close</span>
+              </button>
+            </div>
+          </div>
+          <div class="flex border-b border-[var(--border)] bg-[var(--bg-elevated)]/50 shrink-0 text-xs">
+            <button id="agent-tab-work-log" type="button" class="flex-1 py-1.5 text-center font-medium border-b-2 border-[var(--accent)] text-[var(--accent)] transition-colors cursor-pointer" data-i18n="agent.tabWorkLog">工作历程</button>
+            <button id="agent-tab-knowledge" type="button" class="flex-1 py-1.5 text-center font-medium border-b-2 border-transparent text-muted hover:text-primary transition-colors cursor-pointer" data-i18n="agent.tabKnowledge">知识与凭据</button>
+          </div>
+          <div id="agent-memory-add-form" class="hidden p-3 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0"></div>
+          <div id="agent-memory-content" class="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar text-[12px]"></div>
+          <div id="agent-memory-batch-bar" class="hidden flex items-center justify-between px-3 py-1.5 bg-[var(--bg-elevated)] border-t border-[var(--border)] text-xs shrink-0">
+            <div class="flex items-center gap-2">
+              <span id="agent-memory-selected-count" class="text-primary font-medium text-[11px]">已选择 0 项</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <button id="agent-memory-batch-cancel" type="button" class="px-2 py-0.5 rounded text-muted hover:text-primary hover:bg-[var(--bg-hover)] cursor-pointer text-[11px]" data-i18n="agent.batchCancel">退出管理</button>
+              <button id="agent-memory-batch-delete" type="button" class="px-2.5 py-0.5 rounded bg-error/15 text-error hover:bg-error/25 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-medium flex items-center gap-1 cursor-pointer text-[11px]" disabled>
+                <span class="material-symbols-outlined text-[13px]">delete</span>
+                <span data-i18n="agent.batchDelete">批量删除</span>
+              </button>
+            </div>
+          </div>
         </div>
-        <div id="agent-memory-add-form" class="hidden p-3 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0"></div>
-        <div id="agent-memory-content" class="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar text-[12px]"></div>
-      </div>
-      <div id="agent-messages" class="flex-1 overflow-y-auto px-4 py-3 space-y-3 custom-scrollbar text-[13px]"></div>
-      <div class="agent-panel-composer px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-elevated)]">
-        <div id="agent-quick-chips" class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-2 select-none">
-          <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptError">
-            <span class="material-symbols-outlined text-[13px] text-error">error_outline</span>
-            <span data-i18n="agent.chipError">分析报错</span>
-          </button>
-          <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptSystem">
-            <span class="material-symbols-outlined text-[13px] text-primary">monitoring</span>
-            <span data-i18n="agent.chipSystem">系统负载</span>
-          </button>
-          <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptNetwork">
-            <span class="material-symbols-outlined text-[13px] text-secondary">lan</span>
-            <span data-i18n="agent.chipNetwork">端口网络</span>
-          </button>
-          <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptDocker">
-            <span class="material-symbols-outlined text-[13px]">deployed_code</span>
-            <span data-i18n="agent.chipDocker">Docker 状态</span>
-          </button>
-        </div>
-        <div id="agent-context" class="agent-context-container hidden"></div>
-        <div class="flex gap-2.5 items-end">
-          <textarea id="agent-input" data-i18n-placeholder="agent.placeholder" placeholder="描述你希望 Agent 完成的任务…"
-            rows="1"
-            class="terminal-input flex-1 text-[13px] resize-none overflow-y-auto"
-            style="max-height: 140px; line-height: 1.5; padding: 8px 12px; border-radius: 8px;"
-            autocomplete="off"></textarea>
-          <button id="agent-send-btn" class="agent-send-btn shrink-0" data-i18n-title="agent.send" title="发送">
-            <span class="material-symbols-outlined" style="font-size:20px;">arrow_upward</span>
-          </button>
+        <div id="agent-messages" class="flex-1 overflow-y-auto px-4 py-3 space-y-3 custom-scrollbar text-[13px]"></div>
+        <div class="agent-panel-composer px-4 py-3 border-t border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
+          <div id="agent-quick-chips" class="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-2 select-none">
+            <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptError">
+              <span class="material-symbols-outlined text-[13px] text-error">error_outline</span>
+              <span data-i18n="agent.chipError">分析报错</span>
+            </button>
+            <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptSystem">
+              <span class="material-symbols-outlined text-[13px] text-primary">monitoring</span>
+              <span data-i18n="agent.chipSystem">系统负载</span>
+            </button>
+            <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptNetwork">
+              <span class="material-symbols-outlined text-[13px] text-secondary">lan</span>
+              <span data-i18n="agent.chipNetwork">端口网络</span>
+            </button>
+            <button type="button" class="agent-quick-chip shrink-0 text-[11px] px-2 py-0.5 rounded border border-outline-variant/60 hover:border-[var(--accent)] text-muted hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-[var(--bg)]" data-prompt-key="promptDocker">
+              <span class="material-symbols-outlined text-[13px]">deployed_code</span>
+              <span data-i18n="agent.chipDocker">Docker 状态</span>
+            </button>
+          </div>
+          <div id="agent-context" class="agent-context-container hidden"></div>
+          <div class="flex gap-2.5 items-end">
+            <textarea id="agent-input" data-i18n-placeholder="agent.placeholder" placeholder="描述你希望 Agent 完成的任务…"
+              rows="1"
+              class="terminal-input flex-1 text-[13px] resize-none overflow-y-auto"
+              style="max-height: 140px; line-height: 1.5; padding: 8px 12px; border-radius: 8px;"
+              autocomplete="off"></textarea>
+            <button id="agent-send-btn" class="agent-send-btn shrink-0" data-i18n-title="agent.send" title="发送">
+              <span class="material-symbols-outlined" style="font-size:20px;">arrow_upward</span>
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -250,17 +296,29 @@ export class AgentPanel {
     this.memoryCountEl = this.panelEl.querySelector('#agent-memory-count');
     this.memoryAddBtn = this.panelEl.querySelector('#agent-memory-add-btn');
     this.memoryAddFormContainerEl = this.panelEl.querySelector('#agent-memory-add-form');
+    this.memoryBatchBtn = this.panelEl.querySelector('#agent-memory-batch-btn');
+    this.memoryBatchBarEl = this.panelEl.querySelector('#agent-memory-batch-bar');
+    this.memorySelectedCountEl = this.panelEl.querySelector('#agent-memory-selected-count');
+    this.memoryBatchCancelBtn = this.panelEl.querySelector('#agent-memory-batch-cancel');
+    this.memoryBatchDeleteBtn = this.panelEl.querySelector('#agent-memory-batch-delete');
     this.bindEvents();
     this.updateInputState();
+    if (this.serverId) {
+      this.loadSessionDraft();
+    }
   }
 
   private bindEvents(): void {
     this.panelEl?.querySelector('#agent-close-btn')?.addEventListener('click', () => this.hide());
+    this.panelEl?.querySelector('#agent-new-chat-btn')?.addEventListener('click', () => void this.handleNewChat());
     this.panelEl?.querySelector('#agent-memory-btn')?.addEventListener('click', () => this.toggleMemoryDrawer());
     this.panelEl?.querySelector('#agent-memory-close-btn')?.addEventListener('click', () => this.closeMemoryDrawer());
     this.memoryTabWorkLogBtn?.addEventListener('click', () => this.switchMemoryTab('workLog'));
     this.memoryTabKnowledgeBtn?.addEventListener('click', () => this.switchMemoryTab('knowledge'));
     this.memoryAddBtn?.addEventListener('click', () => this.toggleAddKnowledgeForm());
+    this.memoryBatchBtn?.addEventListener('click', () => this.toggleBatchMode());
+    this.memoryBatchCancelBtn?.addEventListener('click', () => this.exitBatchMode());
+    this.memoryBatchDeleteBtn?.addEventListener('click', () => void this.handleBatchDelete());
 
     this.panelEl?.querySelectorAll('.agent-quick-chip').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -275,7 +333,13 @@ export class AgentPanel {
       });
     });
 
-    this.sendBtn?.addEventListener('click', () => this.handleSend());
+    this.sendBtn?.addEventListener('click', () => {
+      if (this.isAgentRunning) {
+        this.handleStop();
+      } else {
+        this.handleSend();
+      }
+    });
 
     this.inputEl?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -313,21 +377,39 @@ export class AgentPanel {
 
   show(): void {
     if (!this.isLoggedIn) return;
+    this.beforeShowHandler?.();
+    this.render();
+    if (!this.panelEl) return;
     this.isVisible = true;
-    if (this.panelEl) this.panelEl.style.display = 'flex';
+    this.panelEl.style.display = 'flex';
+    // 强制触发 reflow 确保 CSS 平滑滑入过渡生效
+    void this.panelEl.offsetWidth;
+    this.panelEl.style.transform = 'translateX(0)';
     document.body.classList.add('agent-panel-open');
     this.inputEl?.focus();
     if (this.serverId) void this.fetchServerMemory();
-    // 触发终端重新适配（面板展开后终端区域缩小，需要 refit）
     requestAnimationFrame(() => this.onLayoutChange?.());
   }
 
   hide(): void {
     this.rejectPendingConfirmation(false);
     this.isVisible = false;
-    if (this.panelEl) this.panelEl.style.display = 'none';
+    if (this.panelEl) {
+      this.panelEl.style.transform = 'translateX(100%)';
+      const handleTransitionEnd = () => {
+        if (!this.isVisible && this.panelEl) {
+          this.panelEl.style.display = 'none';
+        }
+        this.panelEl?.removeEventListener('transitionend', handleTransitionEnd);
+      };
+      this.panelEl.addEventListener('transitionend', handleTransitionEnd, { once: true });
+      setTimeout(() => {
+        if (!this.isVisible && this.panelEl) {
+          this.panelEl.style.display = 'none';
+        }
+      }, 320);
+    }
     document.body.classList.remove('agent-panel-open');
-    // 触发终端重新适配（面板收起后终端区域恢复，需要 refit）
     requestAnimationFrame(() => this.onLayoutChange?.());
   }
 
@@ -387,7 +469,12 @@ export class AgentPanel {
       case 'progress_extend':
         this.showProgressExtend(msg.message, msg.currentIteration, msg.newMax, msg.reason);
         break;
+      case 'reset_done':
+        this.isAgentRunning = false;
+        this.updateInputState();
+        break;
       case 'memory_updated':
+        this.clearSessionDraft();
         if (this.serverId) {
           void this.fetchServerMemory();
         }
@@ -413,8 +500,14 @@ export class AgentPanel {
   sendMessage(text: string, terminalSelection: TerminalSelectionContext | null = null): boolean {
     const message = text.trim();
     if (!message) return false;
-    if (this.isAgentRunning) return false;
     if (this.isWaitingConfirmation) return false;
+
+    const isSupersede = this.isAgentRunning;
+    if (isSupersede) {
+      this.markLastActiveMessageAborted();
+      this.wsSend?.(JSON.stringify({ type: 'agent_stop' }));
+    }
+
     const outboundMessage = terminalSelection
       ? buildTerminalSelectionMessage(message, terminalSelection)
       : message;
@@ -431,30 +524,123 @@ export class AgentPanel {
     this.updateInputState();
 
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    this.wsSend?.(
-      JSON.stringify({
-        type: 'agent_start',
-        message: outboundMessage,
-        locale: getLocale(),
-        timezone,
-      })
-    );
+    const payload = {
+      type: 'agent_start',
+      message: outboundMessage,
+      locale: getLocale(),
+      timezone,
+      supersede: isSupersede ? true : undefined,
+    };
+    this.wsSend?.(JSON.stringify(payload));
     return true;
   }
 
   private updateInputState(): void {
-    const blocked = this.isAgentRunning || this.isWaitingConfirmation;
+    const isRunning = this.isAgentRunning;
+    const isWaiting = this.isWaitingConfirmation;
+
     if (this.inputEl) {
-      this.inputEl.disabled = blocked;
-      this.inputEl.placeholder = blocked ? t('agent.thinking') : t('agent.placeholder');
+      this.inputEl.disabled = isWaiting;
+      this.inputEl.placeholder = isRunning ? t('agent.stopAndResend') : t('agent.placeholder');
     }
+
     if (this.sendBtn) {
-      (this.sendBtn as HTMLButtonElement).disabled = blocked || !this.inputEl?.value.trim();
+      const btn = this.sendBtn as HTMLButtonElement;
+      if (isRunning) {
+        btn.disabled = false;
+        btn.classList.add('is-stopping');
+        btn.title = t('agent.stop');
+        btn.setAttribute('data-i18n-title', 'agent.stop');
+        // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+        btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:18px;">stop</span>';
+      } else {
+        btn.classList.remove('is-stopping');
+        btn.title = t('agent.send');
+        btn.setAttribute('data-i18n-title', 'agent.send');
+        btn.disabled = isWaiting || !this.inputEl?.value.trim();
+        // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+        btn.innerHTML = '<span class="material-symbols-outlined" style="font-size:20px;">arrow_upward</span>';
+      }
     }
   }
 
-  private addUserMessage(text: string, hasTerminalSelection = false): void {
-    this.appendMessage('user', text, { hasTerminalSelection });
+  handleStop(): void {
+    if (!this.isAgentRunning && !this.isWaitingConfirmation) return;
+    this.wsSend?.(JSON.stringify({ type: 'agent_stop' }));
+    if (this.isWaitingConfirmation) {
+      this.rejectPendingConfirmation(false);
+    }
+    this.isAgentRunning = false;
+    this.markLastActiveMessageAborted();
+    this.updateInputState();
+  }
+
+  private markLastActiveMessageAborted(): void {
+    if (this.thinkingProcessEl) {
+      this.collapseThinkingProcess();
+      if (this.thinkingStatusEl) {
+        this.thinkingStatusEl.textContent = `${t('agent.abortedBadge')} (${this.thinkingStepCount})`;
+      }
+      const mainIcon = this.thinkingProcessEl.querySelector('.tp-icon') as HTMLElement | null;
+      if (mainIcon) {
+        mainIcon.textContent = 'cancel';
+        mainIcon.style.color = 'var(--error)';
+      }
+    }
+
+    if (this.streamingEl) {
+      this.streamingEl.remove();
+      this.streamingEl = null;
+      this.streamingText = '';
+    }
+  }
+
+  private async handleNewChat(): Promise<void> {
+    if (this.sessionMessages.length > 0 || this.isAgentRunning) {
+      const ok = await confirmAction({
+        title: t('agent.newChat'),
+        message: t('agent.newChatConfirm'),
+        variant: 'danger',
+      });
+      if (!ok) return;
+    }
+
+    if (this.isAgentRunning) {
+      this.handleStop();
+    }
+    this.wsSend?.(JSON.stringify({ type: 'agent_reset' }));
+    this.resetPanelState();
+  }
+
+  private resetPanelState(): void {
+    this.sessionMessages = [];
+    this.clearSessionDraft();
+    if (this.messagesEl) {
+      this.messagesEl.innerHTML = '';
+    }
+    this.streamingEl = null;
+    this.streamingText = '';
+    this.removeThinkingProcess();
+    this.removeResumeChip();
+    this.thinkingStepCount = 0;
+    this.livePreviewCache = [];
+    if (this.pendingConfirmation) {
+      this.rejectPendingConfirmation(false);
+    }
+    this.clearTerminalSelectionContext();
+    this.isAgentRunning = false;
+    this.updateInputState();
+  }
+
+  private addUserMessage(text: string, hasTerminalSelection = false, userIndex?: number): void {
+    this.removeResumeChip();
+    const resolvedUserIndex =
+      typeof userIndex === 'number'
+        ? userIndex
+        : this.sessionMessages.filter((m) => m.role === 'user').length;
+    this.sessionMessages.push({ role: 'user', content: text, hasTerminalSelection });
+    this.saveSessionDraft(true);
+    this.appendMessage('user', text, { hasTerminalSelection, userIndex: resolvedUserIndex });
   }
 
   private renderTerminalSelectionContext(): void {
@@ -682,7 +868,14 @@ export class AgentPanel {
   }
 
   private addAgentResponse(content: string): void {
+    if (this.streamingEl) {
+      this.streamingEl.remove();
+      this.streamingEl = null;
+      this.streamingText = '';
+    }
     this.collapseThinkingProcess();
+    this.sessionMessages.push({ role: 'response', content: content || '' });
+    this.saveSessionDraft(false);
     this.appendMessage('response', content || '');
   }
 
@@ -697,12 +890,12 @@ export class AgentPanel {
       el.className = 'agent-message agent-response';
 
       const themeColor = 'var(--agent-agent-color)';
-      const roleIcon = `<span class="material-symbols-outlined text-[14px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">smart_toy</span>`;
+      const roleIcon = `<span class="material-symbols-outlined text-[15px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">smart_toy</span>`;
 
     // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
       el.innerHTML = `
         <div class="flex gap-2 items-start">
-          <div class="shrink-0 mt-0.5">${roleIcon}</div>
+          <div class="agent-role-icon-wrapper">${roleIcon}</div>
           <div class="flex-1 min-w-0 text-[13px] whitespace-pre-wrap agent-md-content"></div>
         </div>
       `;
@@ -741,6 +934,8 @@ export class AgentPanel {
         contentEl.innerHTML = inner ? inner.innerHTML : content || this.streamingText || '';
         this.enhanceCodeBlocks(contentEl);
       }
+      this.sessionMessages.push({ role: 'response', content: content || this.streamingText || '' });
+      this.saveSessionDraft(false);
       this.streamingEl = null;
       this.streamingText = '';
     } else {
@@ -756,6 +951,8 @@ export class AgentPanel {
       this.streamingText = '';
     }
     this.collapseThinkingProcess();
+    this.sessionMessages.push({ role: 'error', content: message || t('feedback.danger') });
+    this.saveSessionDraft(false);
     this.appendMessage('error', message || t('feedback.danger'));
   }
 
@@ -906,7 +1103,7 @@ export class AgentPanel {
   private appendMessage(
     role: string,
     content: string,
-    options: { hasTerminalSelection?: boolean } = {}
+    options: { hasTerminalSelection?: boolean; userIndex?: number } = {}
   ): void {
     const el = document.createElement('div');
     el.className = `agent-message agent-${role}`;
@@ -925,50 +1122,33 @@ export class AgentPanel {
           : 'var(--on-surface-variant)';
 
     const roleIcon = isUser
-      ? `<span class="material-symbols-outlined text-[14px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">person</span>`
+      ? `<span class="material-symbols-outlined text-[15px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">person</span>`
       : isAgent
-        ? `<span class="material-symbols-outlined text-[14px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">smart_toy</span>`
+        ? `<span class="material-symbols-outlined text-[15px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">smart_toy</span>`
         : isExecuting
-          ? `<span class="material-symbols-outlined text-[14px]" style="color:${themeColor};font-variation-settings:'FILL' 0;">terminal</span>`
-          : `<span class="material-symbols-outlined text-[14px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">error</span>`;
+          ? `<span class="material-symbols-outlined text-[15px]" style="color:${themeColor};font-variation-settings:'FILL' 0;">terminal</span>`
+          : `<span class="material-symbols-outlined text-[15px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">error</span>`;
 
     let renderedContent: string;
     if (isAgent) {
       renderedContent = this.renderMarkdown(content || '');
-    } else if (isUser) {
-      renderedContent = `<div style="color:${themeColor};white-space:pre-wrap;word-break:break-word;">${escapeHtml(content)}</div>`;
     } else if (isExecuting) {
       renderedContent = `<div class="font-code text-[11px]" style="color:${themeColor};white-space:pre-wrap;word-break:break-all;">${escapeHtml(content)}</div>`;
     } else {
       renderedContent = `<div style="color:${themeColor};word-break:break-word;">${escapeHtml(content)}</div>`;
     }
-    const terminalSelectionBadge =
-      isUser && options.hasTerminalSelection
-        ? `<div class="agent-message-context">
-          <span class="material-symbols-outlined" aria-hidden="true">terminal</span>
-          <span>${t('agent.selectionAttachedMessage')}</span>
-        </div>`
-        : '';
 
     // User messages: bubble on right. Agent/others: full width on left.
     if (isUser) {
-    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
-      el.innerHTML = `
-        <div class="flex justify-end">
-          <div class="max-w-[85%] px-3 py-2 rounded-lg" style="background: color-mix(in srgb, ${themeColor} 12%, transparent); border: 1px solid color-mix(in srgb, ${themeColor} 30%, transparent);">
-            ${terminalSelectionBadge}
-            <div class="flex gap-2 items-start">
-              <div class="flex-1 min-w-0 text-[13px]">${renderedContent}</div>
-              <div class="shrink-0 mt-0.5">${roleIcon}</div>
-            </div>
-          </div>
-        </div>
-      `;
+      if (typeof options.userIndex === 'number') {
+        el.dataset.userIndex = String(options.userIndex);
+      }
+      this.renderUserMessageContent(el, content, options);
     } else {
     // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
       el.innerHTML = `
         <div class="flex gap-2 items-start">
-          <div class="shrink-0 mt-0.5">${roleIcon}</div>
+          <div class="agent-role-icon-wrapper">${roleIcon}</div>
           <div class="flex-1 min-w-0 text-[13px]">${renderedContent}</div>
         </div>
       `;
@@ -979,6 +1159,203 @@ export class AgentPanel {
       this.enhanceCodeBlocks(el);
     }
     this.scrollToBottom();
+  }
+
+  private renderUserMessageContent(
+    el: HTMLElement,
+    content: string,
+    options: { hasTerminalSelection?: boolean; userIndex?: number }
+  ): void {
+    const themeColor = 'var(--agent-user-color)';
+    const roleIcon = `<span class="material-symbols-outlined text-[15px]" style="color:${themeColor};font-variation-settings:'FILL' 1;">person</span>`;
+    const renderedContent = `<div style="color:${themeColor};white-space:pre-wrap;word-break:break-word;line-height:1.6;">${escapeHtml(content)}</div>`;
+    const terminalSelectionBadge =
+      options.hasTerminalSelection
+        ? `<div class="agent-message-context">
+          <span class="material-symbols-outlined" aria-hidden="true">terminal</span>
+          <span>${t('agent.selectionAttachedMessage')}</span>
+        </div>`
+        : '';
+
+    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+    el.innerHTML = `
+      <div class="flex justify-end agent-user-container group relative">
+        <div class="max-w-[calc(100%-64px)] px-3 py-2 rounded-lg agent-user-bubble relative" style="background: color-mix(in srgb, ${themeColor} 12%, transparent); border: 1px solid color-mix(in srgb, ${themeColor} 30%, transparent);">
+          ${terminalSelectionBadge}
+          <div class="flex gap-2 items-start">
+            <div class="flex-1 min-w-0 text-[13px] leading-relaxed">${renderedContent}</div>
+            <div class="agent-role-icon-wrapper">${roleIcon}</div>
+          </div>
+          <div class="agent-user-actions">
+            <button type="button" class="agent-user-action-btn agent-user-copy-btn" data-i18n-title="agent.copyPrompt" title="${t('agent.copyPrompt')}">
+              <span class="material-symbols-outlined text-[13px]">content_copy</span>
+            </button>
+            <button type="button" class="agent-user-action-btn agent-user-edit-btn" data-i18n-title="agent.editPrompt" title="${t('agent.editPrompt')}">
+              <span class="material-symbols-outlined text-[13px]">edit</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.bindUserMessageActions(el, content, options);
+  }
+
+  private bindUserMessageActions(
+    el: HTMLElement,
+    content: string,
+    options: { hasTerminalSelection?: boolean; userIndex?: number }
+  ): void {
+    const copyBtn = el.querySelector<HTMLButtonElement>('.agent-user-copy-btn');
+    const editBtn = el.querySelector<HTMLButtonElement>('.agent-user-edit-btn');
+    copyBtn?.addEventListener('click', async () => {
+      const copied = await copyTextToClipboard(content);
+      const icon = copyBtn.querySelector('.material-symbols-outlined');
+      if (icon) {
+        icon.textContent = copied ? 'check' : 'close';
+        setTimeout(() => {
+          if (icon) icon.textContent = 'content_copy';
+        }, 1500);
+      }
+    });
+    editBtn?.addEventListener('click', () => {
+      this.enterInlineEditMode(el, content, options);
+    });
+  }
+
+  private enterInlineEditMode(
+    el: HTMLElement,
+    originalContent: string,
+    options: { hasTerminalSelection?: boolean; userIndex?: number }
+  ): void {
+    if (this.isAgentRunning) {
+      this.handleStop();
+    }
+
+    const themeColor = 'var(--agent-user-color)';
+
+    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+    el.innerHTML = `
+      <div class="flex flex-col items-end agent-user-edit-container w-full">
+        <div class="agent-user-edit-bubble max-w-[85%] min-w-[160px] rounded-xl px-3 py-2 relative transition-all"
+             style="background: color-mix(in srgb, ${themeColor} 14%, var(--bg-elevated)); border: 1.5px solid var(--accent);">
+          <textarea class="agent-user-edit-textarea w-full bg-transparent border-none outline-none resize-none text-[13px] leading-relaxed custom-scrollbar"
+                    style="color: var(--on-surface); min-height: 24px; max-height: 200px;">${escapeHtml(originalContent)}</textarea>
+        </div>
+        <div class="flex items-center justify-end gap-2 mt-1.5 mr-0.5 select-none">
+          <button type="button" class="agent-user-edit-cancel text-xs text-muted hover:text-on-surface px-2 py-1 rounded cursor-pointer transition-colors">
+            ${t('common.cancel')}
+          </button>
+          <button type="button" class="agent-user-edit-save text-xs px-3.5 py-1 rounded-md font-medium cursor-pointer transition-opacity bg-[var(--accent)] text-[var(--on-accent)] hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed">
+            ${t('common.save')}
+          </button>
+        </div>
+      </div>
+    `;
+
+    const textarea = el.querySelector<HTMLTextAreaElement>('.agent-user-edit-textarea')!;
+    const cancelBtn = el.querySelector<HTMLButtonElement>('.agent-user-edit-cancel')!;
+    const saveBtn = el.querySelector<HTMLButtonElement>('.agent-user-edit-save')!;
+
+    const autoResize = () => {
+      textarea.style.height = 'auto';
+      textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 24), 200)}px`;
+      saveBtn.disabled = !textarea.value.trim();
+    };
+
+    autoResize();
+    requestAnimationFrame(() => {
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    });
+
+    textarea.addEventListener('input', autoResize);
+
+    const cancel = () => {
+      this.renderUserMessageContent(el, originalContent, options);
+    };
+
+    cancelBtn.addEventListener('click', cancel);
+
+    const saveAndSubmit = () => {
+      const newText = textarea.value.trim();
+      if (!newText) return;
+      this.submitInlineEdit(el, newText, options);
+    };
+
+    saveBtn.addEventListener('click', saveAndSubmit);
+
+    textarea.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        cancel();
+      } else if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        saveAndSubmit();
+      }
+    });
+  }
+
+  private submitInlineEdit(
+    el: HTMLElement,
+    newText: string,
+    options: { hasTerminalSelection?: boolean; userIndex?: number }
+  ): void {
+    if (!newText.trim()) return;
+
+    const wasRunning = this.isAgentRunning;
+    if (wasRunning) {
+      this.handleStop();
+    }
+
+    const targetUserIndex = options.userIndex ?? 0;
+
+    // 1. 删除当前消息之后的所有后续节点（思考、执行、回复等全部清除，无需保留留痕）
+    while (el.nextElementSibling) {
+      el.nextElementSibling.remove();
+    }
+
+    // 2. 截断 sessionMessages 至当前用户消息轮次
+    let currentUserCount = 0;
+    let targetSessionIndex = -1;
+    for (let i = 0; i < this.sessionMessages.length; i++) {
+      if (this.sessionMessages[i].role === 'user') {
+        if (currentUserCount === targetUserIndex) {
+          targetSessionIndex = i;
+          break;
+        }
+        currentUserCount++;
+      }
+    }
+    if (targetSessionIndex !== -1) {
+      this.sessionMessages = this.sessionMessages.slice(0, targetSessionIndex);
+    }
+
+    // 3. 移除当前编辑态 DOM，通过 addUserMessage 重建该用户消息气泡并更新草稿
+    el.remove();
+    this.addUserMessage(newText, !!options.hasTerminalSelection, targetUserIndex);
+
+    // 4. 重置流式与思考状态
+    this.streamingEl = null;
+    this.streamingText = '';
+    this.removeThinkingProcess();
+    this.thinkingStepCount = 0;
+    this.livePreviewCache = [];
+
+    this.isAgentRunning = true;
+    this.updateInputState();
+
+    // 5. 向后端下发带 userIndex 的 agent_start，指示后端截断 state.messages 至目标轮次并重新执行
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const payload = {
+      type: 'agent_start',
+      message: newText,
+      locale: getLocale(),
+      timezone,
+      userIndex: targetUserIndex,
+      supersede: wasRunning ? true : undefined,
+    };
+    this.wsSend?.(JSON.stringify(payload));
   }
 
   private renderMarkdown(text: string): string {
@@ -1110,6 +1487,89 @@ export class AgentPanel {
     }
   }
 
+  private renderResumeChip(): void {
+    const chipsContainer = this.panelEl?.querySelector('#agent-quick-chips');
+    if (!chipsContainer || chipsContainer.querySelector('#agent-resume-task-chip')) return;
+
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.id = 'agent-resume-task-chip';
+    chip.className =
+      'agent-quick-chip shrink-0 text-[11px] px-2.5 py-0.5 rounded border border-warning/60 hover:border-warning text-warning hover:text-primary transition-colors cursor-pointer flex items-center gap-1 bg-warning/10 font-medium';
+    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+    chip.innerHTML = `
+      <span class="material-symbols-outlined text-[13px]">play_circle</span>
+      <span data-i18n="agent.resumeInterruptedTask">${escapeHtml(t('agent.resumeInterruptedTask'))}</span>
+    `;
+    chip.addEventListener('click', () => {
+      chip.remove();
+      this.sendMessage(t('agent.resumePrompt'));
+    });
+    chipsContainer.prepend(chip);
+  }
+
+  private removeResumeChip(): void {
+    this.panelEl?.querySelector('#agent-resume-task-chip')?.remove();
+  }
+
+  private loadSessionDraft(): void {
+    if (!this.serverId || !this.messagesEl) return;
+    try {
+      const raw = localStorage.getItem(`cloudssh_agent_draft_${this.serverId}`);
+      if (!raw) return;
+      const draft = JSON.parse(raw);
+      if (!draft || !Array.isArray(draft.messages) || draft.messages.length === 0) return;
+      // 仅恢复 30 分钟内的中断会话；已完成或过期会话立即清理，避免与云端提炼记忆重复
+      if (
+        !draft.wasInterrupted ||
+        Date.now() - Number(draft.updatedAt || 0) > SESSION_DRAFT_TTL_MS
+      ) {
+        localStorage.removeItem(`cloudssh_agent_draft_${this.serverId}`);
+        return;
+      }
+      this.sessionMessages = [...draft.messages];
+      this.messagesEl.innerHTML = '';
+      let userCounter = 0;
+      for (const m of this.sessionMessages) {
+        const uIdx = m.role === 'user' ? userCounter++ : undefined;
+        this.appendMessage(m.role, m.content, {
+          hasTerminalSelection: m.hasTerminalSelection,
+          userIndex: uIdx,
+        });
+      }
+      this.renderResumeChip();
+    } catch {
+      /* ignore corrupted draft */
+    }
+  }
+
+  private saveSessionDraft(isInterrupted: boolean): void {
+    if (!this.serverId) return;
+    // 任务正常完成或无消息时，立即删除本地暂存草稿，由云端记忆（WorkLog & Knowledge）全权接管
+    if (!isInterrupted || this.sessionMessages.length === 0) {
+      localStorage.removeItem(`cloudssh_agent_draft_${this.serverId}`);
+      return;
+    }
+    try {
+      const draft = {
+        serverId: this.serverId,
+        updatedAt: Date.now(),
+        messages: this.sessionMessages.slice(-20),
+        wasInterrupted: true,
+      };
+      localStorage.setItem(`cloudssh_agent_draft_${this.serverId}`, JSON.stringify(draft));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private clearSessionDraft(): void {
+    if (this.serverId) {
+      localStorage.removeItem(`cloudssh_agent_draft_${this.serverId}`);
+    }
+    this.removeResumeChip();
+  }
+
   dispose(): void {
     this.rejectPendingConfirmation(false);
     this.localeCleanup?.();
@@ -1128,6 +1588,11 @@ export class AgentPanel {
     this.memoryCountEl = null;
     this.memoryAddBtn = null;
     this.memoryAddFormContainerEl = null;
+    this.memoryBatchBtn = null;
+    this.memoryBatchBarEl = null;
+    this.memorySelectedCountEl = null;
+    this.memoryBatchCancelBtn = null;
+    this.memoryBatchDeleteBtn = null;
     this.isVisible = false;
     document.body.classList.remove('agent-panel-open');
   }
@@ -1155,11 +1620,13 @@ export class AgentPanel {
     if (this.memoryDrawerEl) {
       this.memoryDrawerEl.classList.add('hidden');
     }
+    this.exitBatchMode();
     this.closeAddKnowledgeForm();
   }
 
   switchMemoryTab(tab: 'workLog' | 'knowledge'): void {
     this.activeMemoryTab = tab;
+    this.exitBatchMode();
     if (this.memoryTabWorkLogBtn && this.memoryTabKnowledgeBtn) {
       if (tab === 'workLog') {
         this.memoryTabWorkLogBtn.className =
@@ -1167,16 +1634,132 @@ export class AgentPanel {
         this.memoryTabKnowledgeBtn.className =
           'flex-1 py-1.5 text-center font-medium border-b-2 border-transparent text-muted hover:text-primary transition-colors cursor-pointer';
         this.memoryAddBtn?.classList.add('hidden');
+        this.memoryBatchBtn?.classList.add('hidden');
       } else {
         this.memoryTabWorkLogBtn.className =
           'flex-1 py-1.5 text-center font-medium border-b-2 border-transparent text-muted hover:text-primary transition-colors cursor-pointer';
         this.memoryTabKnowledgeBtn.className =
           'flex-1 py-1.5 text-center font-medium border-b-2 border-[var(--accent)] text-[var(--accent)] transition-colors cursor-pointer';
         this.memoryAddBtn?.classList.remove('hidden');
+        if (this.unifiedMemory.knowledge.length > 0 && this.serverId && this.isLoggedIn) {
+          this.memoryBatchBtn?.classList.remove('hidden');
+        } else {
+          this.memoryBatchBtn?.classList.add('hidden');
+        }
       }
     }
     this.closeAddKnowledgeForm();
     this.renderMemoryContent();
+  }
+
+  toggleBatchMode(): void {
+    if (this.isBatchMode) {
+      this.exitBatchMode();
+    } else {
+      this.enterBatchMode();
+    }
+  }
+
+  private enterBatchMode(): void {
+    this.isBatchMode = true;
+    this.selectedKnowledgeIds.clear();
+    this.memoryBatchBarEl?.classList.remove('hidden');
+    const textEl = this.panelEl?.querySelector('#agent-memory-batch-btn-text');
+    if (textEl) textEl.textContent = t('agent.batchCancel');
+    this.updateBatchBar();
+    this.renderMemoryContent();
+  }
+
+  exitBatchMode(): void {
+    if (!this.isBatchMode) return;
+    this.isBatchMode = false;
+    this.selectedKnowledgeIds.clear();
+    this.memoryBatchBarEl?.classList.add('hidden');
+    const textEl = this.panelEl?.querySelector('#agent-memory-batch-btn-text');
+    if (textEl) textEl.textContent = t('agent.batchManage');
+    this.renderMemoryContent();
+  }
+
+  private updateBatchBar(): void {
+    if (this.memorySelectedCountEl) {
+      this.memorySelectedCountEl.textContent = t('agent.selectedCount', {
+        count: this.selectedKnowledgeIds.size,
+      });
+    }
+    if (this.memoryBatchDeleteBtn) {
+      this.memoryBatchDeleteBtn.disabled = this.selectedKnowledgeIds.size === 0;
+    }
+  }
+
+  private async handleBatchDelete(): Promise<void> {
+    if (this.selectedKnowledgeIds.size === 0 || !this.serverId) return;
+    const count = this.selectedKnowledgeIds.size;
+    const ok = await confirmAction({
+      title: t('agent.batchDelete'),
+      message: t('agent.batchDeleteConfirm', { count }),
+      variant: 'danger',
+    });
+    if (!ok) return;
+
+    try {
+      const ids = Array.from(this.selectedKnowledgeIds);
+      const res = await fetch(`/api/servers/${this.serverId}/knowledge/batch`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids }),
+      });
+      if (res.ok) {
+        notify(t('agent.batchDeleteSuccess', { count }), { variant: 'success' });
+        this.exitBatchMode();
+        void this.fetchServerMemory();
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to delete' }));
+        notify((err as any).error || 'Failed to delete', { variant: 'danger' });
+      }
+    } catch {
+      notify('Failed to delete', { variant: 'danger' });
+    }
+  }
+
+  private groupKnowledgeByDate(items: ServerKnowledgeItem[]): Array<{
+    key: 'today' | 'yesterday' | 'older';
+    label: string;
+    items: ServerKnowledgeItem[];
+  }> {
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
+
+    const todayItems: ServerKnowledgeItem[] = [];
+    const yesterdayItems: ServerKnowledgeItem[] = [];
+    const olderItems: ServerKnowledgeItem[] = [];
+
+    for (const item of items) {
+      const ts = item.updated_at || item.created_at;
+      if (ts >= todayStart) {
+        todayItems.push(item);
+      } else if (ts >= yesterdayStart) {
+        yesterdayItems.push(item);
+      } else {
+        olderItems.push(item);
+      }
+    }
+
+    const groups: Array<{
+      key: 'today' | 'yesterday' | 'older';
+      label: string;
+      items: ServerKnowledgeItem[];
+    }> = [];
+    if (todayItems.length > 0) {
+      groups.push({ key: 'today', label: t('agent.dateGroupToday'), items: todayItems });
+    }
+    if (yesterdayItems.length > 0) {
+      groups.push({ key: 'yesterday', label: t('agent.dateGroupYesterday'), items: yesterdayItems });
+    }
+    if (olderItems.length > 0) {
+      groups.push({ key: 'older', label: t('agent.dateGroupOlder'), items: olderItems });
+    }
+    return groups;
   }
 
   private async fetchServerMemory(): Promise<void> {
@@ -1205,11 +1788,11 @@ export class AgentPanel {
     if (this.memoryCountEl) {
       if (this.activeMemoryTab === 'workLog') {
         this.memoryCountEl.textContent = this.serverId
-          ? `(${this.unifiedMemory.workLogs.length}/${MAX_SERVER_WORK_LOGS})`
+          ? `(${this.unifiedMemory.workLogs.length})`
           : '';
       } else {
         this.memoryCountEl.textContent = this.serverId
-          ? `(${this.unifiedMemory.knowledge.length}/${MAX_SERVER_KNOWLEDGE})`
+          ? `(${this.unifiedMemory.knowledge.length})`
           : '';
       }
     }
@@ -1296,6 +1879,8 @@ export class AgentPanel {
 
     // Knowledge Tab
     if (this.unifiedMemory.knowledge.length === 0) {
+      this.memoryBatchBtn?.classList.add('hidden');
+      this.exitBatchMode();
       // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
       this.memoryContentEl.innerHTML = `
         <div class="p-4 text-center text-muted text-xs">
@@ -1305,69 +1890,157 @@ export class AgentPanel {
       return;
     }
 
-    const catBadges: Record<string, { label: string; tagClass: string; borderClass: string }> = {
+    if (this.serverId && this.isLoggedIn) {
+      this.memoryBatchBtn?.classList.remove('hidden');
+    }
+
+    const catBadges: Record<string, { label: string; tagClass: string }> = {
       credential: {
         label: t('agent.categoryCredential'),
         tagClass: 'bg-amber-500/15 text-amber-400',
-        borderClass: 'border-l-amber-500',
       },
       config: {
         label: t('agent.categoryConfig'),
         tagClass: 'bg-[var(--accent)]/15 text-[var(--accent)]',
-        borderClass: 'border-l-[var(--accent)]',
       },
       rule: {
         label: t('agent.categoryRule'),
         tagClass: 'bg-[var(--accent-secondary)]/15 text-[var(--accent-secondary)]',
-        borderClass: 'border-l-[var(--accent-secondary)]',
       },
       note: {
         label: t('agent.categoryNote'),
         tagClass: 'bg-emerald-500/15 text-emerald-400',
-        borderClass: 'border-l-emerald-500',
       },
     };
 
-    const knowledgeHtml = this.unifiedMemory.knowledge
-      .map((k) => {
-        const meta = catBadges[k.category] || catBadges.note;
-        const isSecret = k.category === 'credential' || isSensitiveKeyOrValue(k.key, k.value);
-        const isRevealed = this.revealedSecretIds.has(k.id);
-        const displayValue = isSecret && !isRevealed ? '••••••••••••••••' : k.value;
+    const groups = this.groupKnowledgeByDate(this.unifiedMemory.knowledge);
+    const groupsHtml = groups
+      .map((g) => {
+        const isCollapsed = this.collapsedDateGroups.has(g.key);
+        const isAllGroupSelected =
+          g.items.length > 0 && g.items.every((item) => this.selectedKnowledgeIds.has(item.id));
+
+        const itemsHtml = g.items
+          .map((k) => {
+            const meta = catBadges[k.category] || catBadges.note;
+            const isSecret = k.category === 'credential' || isSensitiveKeyOrValue(k.key, k.value);
+            const isRevealed = this.revealedSecretIds.has(k.id);
+            const displayValue = isSecret && !isRevealed ? '••••••••••••••••' : k.value;
+            const isSelected = this.selectedKnowledgeIds.has(k.id);
+
+            return `
+              <div class="agent-knowledge-item group px-3 py-2 flex items-center justify-between gap-2 text-[12px] hover:bg-[var(--bg-hover)]/40 transition-colors select-text" data-knowledge-id="${k.id}">
+                <div class="flex items-center gap-2 min-w-0 flex-1">
+                  ${
+                    this.isBatchMode
+                      ? `<input type="checkbox" class="agent-knowledge-check rounded cursor-pointer shrink-0 accent-[var(--accent)]" data-id="${k.id}" ${isSelected ? 'checked' : ''} />`
+                      : ''
+                  }
+                  <span class="px-1.5 py-0.5 rounded text-[10px] font-medium tracking-wide uppercase shrink-0 ${meta.tagClass}">${escapeHtml(meta.label)}</span>
+                  <span class="font-mono font-semibold text-primary shrink-0 select-all">${escapeHtml(k.key)}:</span>
+                  <span class="font-mono text-muted group-hover:text-primary transition-colors truncate select-all flex-1 min-w-0" title="${escapeHtml(k.value)}">${escapeHtml(displayValue)}</span>
+                </div>
+                <div class="flex items-center gap-0.5 shrink-0">
+                  ${
+                    isSecret
+                      ? `
+                    <button type="button" class="agent-secret-toggle-btn text-muted hover:text-primary transition-colors p-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer flex items-center justify-center" data-id="${k.id}" title="${isRevealed ? t('agent.hideSecret') : t('agent.revealSecret')}">
+                      <span class="material-symbols-outlined text-[15px]">${isRevealed ? 'visibility_off' : 'visibility'}</span>
+                    </button>
+                  `
+                      : ''
+                  }
+                  <button type="button" class="agent-knowledge-copy-btn text-muted hover:text-primary transition-colors p-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer flex items-center justify-center" data-value="${escapeHtml(k.value)}" title="${t('agent.codeCopy')}">
+                    <span class="material-symbols-outlined text-[15px]">content_copy</span>
+                  </button>
+                  ${
+                    !this.isBatchMode
+                      ? `
+                    <button type="button" class="agent-knowledge-delete-btn text-muted hover:text-error transition-colors p-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer flex items-center justify-center" data-id="${k.id}" title="${t('common.delete')}">
+                      <span class="material-symbols-outlined text-[15px]">delete</span>
+                    </button>
+                  `
+                      : ''
+                  }
+                </div>
+              </div>
+            `;
+          })
+          .join('');
 
         return `
-          <div class="agent-memory-card p-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg-elevated)] flex flex-col gap-1.5 select-text" data-knowledge-id="${k.id}">
-            <div class="flex items-center justify-between text-[11px]">
-              <div class="flex items-center gap-2 min-w-0">
-                <span class="px-1.5 py-0.5 rounded text-[10px] font-medium tracking-wide uppercase ${meta.tagClass}">${escapeHtml(meta.label)}</span>
-                <span class="font-mono font-bold text-primary truncate select-all">${escapeHtml(k.key)}</span>
+          <div class="agent-knowledge-group border border-[var(--border)] rounded-lg overflow-hidden bg-[var(--bg-elevated)]/30" data-group-key="${g.key}">
+            <div class="agent-knowledge-group-header flex items-center justify-between px-3 py-1.5 bg-[var(--bg-elevated)]/70 cursor-pointer select-none hover:bg-[var(--bg-hover)]/40 transition-colors" data-group="${g.key}">
+              <div class="flex items-center gap-1.5 text-xs font-semibold text-primary">
+                <span class="material-symbols-outlined text-[16px] transition-transform duration-200 ${isCollapsed ? '-rotate-90' : ''}">expand_more</span>
+                <span>${escapeHtml(g.label)}</span>
+                <span class="text-[11px] font-normal text-muted">(${g.items.length})</span>
               </div>
-              <div class="flex items-center gap-1 shrink-0">
-                ${
-                  isSecret
-                    ? `
-                  <button type="button" class="agent-secret-toggle-btn text-muted hover:text-primary transition-colors p-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer flex items-center justify-center" data-id="${k.id}" title="${isRevealed ? t('agent.hideSecret') : t('agent.revealSecret')}">
-                    <span class="material-symbols-outlined text-[15px]">${isRevealed ? 'visibility_off' : 'visibility'}</span>
-                  </button>
-                `
-                    : ''
-                }
-                <button type="button" class="agent-knowledge-copy-btn text-muted hover:text-primary transition-colors p-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer flex items-center justify-center" data-value="${escapeHtml(k.value)}" title="${t('agent.codeCopy')}">
-                  <span class="material-symbols-outlined text-[15px]">content_copy</span>
+              ${
+                this.isBatchMode
+                  ? `
+                <button type="button" class="agent-group-select-all text-[11px] text-[var(--accent)] hover:underline cursor-pointer" data-group="${g.key}">
+                  ${isAllGroupSelected ? t('agent.deselectGroup') : t('agent.selectGroup')}
                 </button>
-                <button type="button" class="agent-knowledge-delete-btn text-muted hover:text-error transition-colors p-1 rounded hover:bg-[var(--bg-hover)] cursor-pointer flex items-center justify-center" data-id="${k.id}" title="${t('common.delete')}">
-                  <span class="material-symbols-outlined text-[15px]">delete</span>
-                </button>
-              </div>
+              `
+                  : ''
+              }
             </div>
-            <div class="text-[12px] font-mono text-primary/90 bg-[var(--bg-hover)]/30 rounded-r px-2.5 py-1.5 break-all select-all leading-relaxed border-l-2 ${meta.borderClass}">${escapeHtml(displayValue)}</div>
+            <div class="agent-knowledge-group-items divide-y divide-[var(--border)]/30 ${isCollapsed ? 'hidden' : ''}">
+              ${itemsHtml}
+            </div>
           </div>
         `;
       })
       .join('');
 
     // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
-    this.memoryContentEl.innerHTML = knowledgeHtml;
+    this.memoryContentEl.innerHTML = groupsHtml;
+
+    this.memoryContentEl.querySelectorAll<HTMLElement>('.agent-knowledge-group-header').forEach((hdr) => {
+      hdr.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.closest('.agent-group-select-all')) return;
+        const groupKey = hdr.dataset.group;
+        if (!groupKey) return;
+        if (this.collapsedDateGroups.has(groupKey)) {
+          this.collapsedDateGroups.delete(groupKey);
+        } else {
+          this.collapsedDateGroups.add(groupKey);
+        }
+        this.renderMemoryContent();
+      });
+    });
+
+    this.memoryContentEl.querySelectorAll<HTMLButtonElement>('.agent-group-select-all').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const groupKey = btn.dataset.group;
+        const group = groups.find((g) => g.key === groupKey);
+        if (!group) return;
+        const allSelected = group.items.every((k) => this.selectedKnowledgeIds.has(k.id));
+        if (allSelected) {
+          for (const k of group.items) this.selectedKnowledgeIds.delete(k.id);
+        } else {
+          for (const k of group.items) this.selectedKnowledgeIds.add(k.id);
+        }
+        this.updateBatchBar();
+        this.renderMemoryContent();
+      });
+    });
+
+    this.memoryContentEl.querySelectorAll<HTMLInputElement>('.agent-knowledge-check').forEach((chk) => {
+      chk.addEventListener('change', (e) => {
+        e.stopPropagation();
+        const kId = Number(chk.dataset.id);
+        if (chk.checked) {
+          this.selectedKnowledgeIds.add(kId);
+        } else {
+          this.selectedKnowledgeIds.delete(kId);
+        }
+        this.updateBatchBar();
+      });
+    });
 
     this.memoryContentEl.querySelectorAll<HTMLButtonElement>('.agent-secret-toggle-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
