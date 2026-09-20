@@ -96,6 +96,7 @@
 - **IPv4/IPv6 双栈**：完整支持 IPv4 和 IPv6 地址连接，包括 IPv6 方括号格式自动处理。
 - **多种认证方式**：支持标准 SSH 密码认证、RFC 4256 `keyboard-interactive` 多轮交互认证，以及 OpenSSH 格式的 Ed25519、ECDSA P-256/P-384/P-521 和 RSA 私钥认证。交互认证支持密码、OTP、多字段提示与公钥后的二次验证；服务器提示会在绑定当前连接的安全对话框中展示，已保存密码仅在用户明确选择后代填。RSA 默认使用 RSA-SHA2-256/512，只有显式兼容配置才允许旧 `ssh-rsa` SHA-1。
 - **SSH 跳板机/堡垒机**：登录用户可以为已保存服务器选择另一台已保存服务器作为跳板。CloudSSH 使用标准 RFC 4254 `direct-tcpip` 通道逐层建立 SSH，不依赖远端安装 `ssh`、`nc` 或 `socat`；支持最多 3 级跳转，最终目标的终端、SFTP 与 AI Agent 均复用完整加密链路。每一跳独立认证和验证路径隔离的主机指纹。
+- **Cloudflare 隧道（Zero Trust Tunnel）**：支持通过 Cloudflare Tunnel（cloudflared）直连无公网 IP、无开放端口的内网服务器（HomeLab、局域网主机等），无需设置或租用跳板机。底层采用官方标准 WebSocket Carrier 架构将 SSH 二进制帧直接穿透传输，支持可选的 Cloudflare Zero Trust Service Token（Client ID / Client Secret）鉴权保护。上层自研 SSH 协议栈、TOFU 指纹、SFTP 文件系统及 AI Agent 全量无缝复用。
 - **一次性 SSH 授权分享**：可选启用登录用户的服务器分享。链接只包含 256 位随机能力凭证，不携带主机、用户名、密码、私钥或跳板信息；凭证仅保存哈希、只能领取一次且具有独立的领取有效期与会话最长时间。分享会话允许终端和 SFTP，服务端强制禁用 AI Agent、OS 检测、主机指纹修改与自动重连；所有者可以实时撤销，并查看仅针对分享会话生成的生命周期、SFTP 操作与终端输出记录。
 - **防范中间人攻击 (TOFU)**：首次连接自动提取服务器 Host Key（SHA-256 指纹）并显示，支持 Ed25519/ECDSA/RSA 签名验证，并在本地及 API 持久化缓存已知主机指纹以防范二次连接的欺骗风险。
 - **全功能极客终端**：基于 `@xterm/xterm` 与 `@xterm/addon-webgl` 硬件加速渲染引擎，保证海量日志输出顺滑不卡顿。
@@ -305,6 +306,18 @@ SSH 跳转不需要额外环境变量，但必须启用 GitHub OAuth 并使用�
 4. 从服务器列表连接 B。终端、SFTP 和 AI Agent 只在最终目标 B 上运行；任意一跳断开时会重建或关闭整条链路。
 
 跳板关系必须位于同一 GitHub 用户空间，不能形成自引用或循环。正在被其他服务器引用的跳板不能直接删除。SSRF 公网检查与 Durable Object 区域调度均以 Cloudflare 直接连接的最外层入口为准；只有该入口会执行自动区域推断，选择跳板后下游服务器的区域选项会停用，也不会向 IPinfo 发送其内网主机信息。内网地址只能出现在由服务端解析的已保存跳板链中，匿名连接不能提交跳板配置。每一跳都会独立执行 TOFU 主机指纹验证，内网目标的记录按完整跳转路径隔离。
+
+##### 通过 Cloudflare 隧道连接内网服务器
+
+在添加/编辑服务器时，选择**“Cloudflare 隧道”**连接模式，可直接穿透连接无公网 IP、无开放端口的私有内网服务器（如家庭宽带 NAS、局域网机器、私有开发机），免除端口映射或跳板机配置：
+
+1. **内网服务器配置 cloudflared**：在内网服务器运行 Cloudflare Tunnel，将配置好的公开主机名指向本地 SSH 端口（例如 `service: ssh://localhost:22`）。
+2. **在 CloudSSH 添加服务器**：
+   - **网络连接**：切换到「Cloudflare 隧道」分段；
+   - **隧道域名**：填入在 Cloudflare Zero Trust 中配置的公开主机名（例如 `ssh.example.com`）；
+   - **连接区域**：建议根据内网主机的实际物理位置手动选择最近的区域（如亚洲内网选 `亚太地区`），促使 Durable Object 就近实例化，避免跨洋三角路由延迟；
+   - **Zero Trust 访问凭据 (可选)**：若在 Zero Trust 中为该域名开启了 Access 策略，需填入 Service Token 的 Client ID 与 Client Secret；若后续不再需要，支持一键清除已存密钥。
+3. **连接与体验**：连接成功后状态栏会呈现 `CF-XXX`（Cloudflare 到内网隧道握手耗时）与 `RTT`（浏览器到 Cloudflare 边缘耗时）双段延迟，SSH 终端、SFTP 在线编辑与 AI Agent 全量无缝复用。
 
 <a id="development"></a>
 
