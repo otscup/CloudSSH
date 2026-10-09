@@ -10,14 +10,13 @@ tests/
 ├── e2e/                           # Chromium 浏览器交互与 axe 无障碍检查
 ├── ssh/                           # SSH 算法、认证、加密、KEX、Packet 与测试密钥夹具
 ├── worker/                        # Worker 路由、安全、DNS、UserDB、标签与 Cloudflare 隧道测试
-├── agent-code-actions.test.ts # Agent 代码块复制/填入规则
-├── agent-panel-ui.test.ts     # Agent 面板交互、执行状态与手动停止按钮
+├── agent-code-actions.test.ts # Agent 代码块语言归一化与单行 Shell 命令识别
 ├── agent-terminal-selection.test.ts # 终端选区附件和非授权安全边界
 ├── api-errors.test.ts          # API 错误信息边界与状态码
 ├── auth-challenge-dialog.test.ts # RFC 4256 认证挑战对话框交互
 ├── clipboard.test.ts              # Clipboard API 与旧版复制回退
 ├── editor-content.test.ts         # 在线编辑内容解码、BOM/换行符与嗅探
-├── frontend-ux.test.ts            # 前端关键交互源码回归（标签栏/状态栏渲染等）
+├── frontend-ux.test.ts            # 前端纯函数逻辑回归（OS 图标/列表排序过滤/字号/端口/网络质量）
 ├── host-display.test.ts           # IPv4/IPv6 掩码与完整地址复制
 ├── i18n.test.ts                   # 多语言词条和语言解析（zh-CN / zh-TW / en-US）
 ├── known-hosts.test.ts            # 已知主机指纹 TOFU 信任与变更流程
@@ -34,10 +33,10 @@ tests/
 ├── snippet-schema.test.ts         # 片段名称/命令/数量校验与规范化
 ├── snippet-variables.test.ts      # 命令片段 {{var}} 参数占位符提取与替换
 ├── terminal-shortcuts.test.ts     # 终端快捷键（Cmd+F 搜索、Cmd+K 清屏）
+├── terminal-size.test.ts          # 终端尺寸归一化与范围越界校验
 ├── terminal-status.test.ts        # SSH 状态事件翻译
 ├── terminal-text.test.ts          # 终端文本处理
 ├── theme.test.ts                  # 内置/自定义主题
-├── types.test.ts                  # 共享类型和终端尺寸边界
 └── README.md
 ```
 
@@ -92,6 +91,8 @@ pnpm run verify
 - 键盘交互认证、OS 检测、跳板链、SFTP 上传冲突、分享会话策略
 - UserDB 服务器标签/片段迁移、规范化、序列化、更新与隔离
 - AI 模型代理安全：同 Base URL 强绑定免密拉取、跨地址凭据外带拦截（Credential Exfiltration）、CSRF Origin 防护与敏感 Token 脱敏
+- Responses 原生无状态 Agent：HTTP/SSE 跨 chunk 与 CRLF、强制无状态（store: false）、原生输出项与通用 reasoning 节点回传、call_id 配对、执行事实日志（ExecutionJournal）、严格本地参数校验、停止/抢占/重置/编辑分支、原子预算检查点、任务相关性服务器记忆与 usage
+- 流中断/incomplete 不执行残缺工具、不泄露 reasoning；新任务先等旧 exec 清理，不自动重放已执行命令
 
 ### 前端与构建
 
@@ -115,6 +116,7 @@ pnpm run verify
 - 服务器标签筛选、分页与配置快速克隆
 - 多标签操作：双击内联重命名、空值与失焦恢复、右键菜单项与外部点击关闭
 - Agent 终端选区附件与快捷诊断 Prompt 气泡点击填入
+- Responses 前端任务生命周期：正文结束继续运行、run_end 才结束、requestId 隔离过期帧、中文/繁中/英文错误与留存提示
 - 终端选区复制与焦点恢复
 - 认证挑战对话框、iOS 输入法、移动端后台连接恢复与分享会话领取
 - SFTP 覆盖确认、路径面包屑、表头排序、新建文件、主题样式与 UI 回归

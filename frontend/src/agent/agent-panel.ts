@@ -13,6 +13,7 @@ import { copyTextToClipboard } from '../clipboard';
 import { getLocale, onLocaleChange, t, translateDocument } from '../i18n';
 import { confirmAction, notify } from '../ui-feedback';
 import { getTerminalFillCommand, normalizeCodeLanguage } from './code-actions';
+import { responseErrorMessage } from './response-errors';
 import {
   buildTerminalSelectionMessage,
   createTerminalSelectionContext,
@@ -80,6 +81,7 @@ export class AgentPanel {
   private isVisible: boolean = false;
   private beforeShowHandler: (() => void) | null = null;
   private isAgentRunning: boolean = false;
+  private activeRequestId: string | null = null;
   private isWaitingConfirmation: boolean = false;
   private wsSend: ((data: string) => void) | null = null;
   private getTerminalFillTarget: (() => TerminalFillTarget) | null = null;
@@ -127,6 +129,7 @@ export class AgentPanel {
   private memoryBatchCancelBtn: HTMLButtonElement | null = null;
   private memoryBatchDeleteBtn: HTMLButtonElement | null = null;
   private revealedSecretIds: Set<number> = new Set();
+  private hasConfirmedSession: boolean = false;
   private sessionMessages: Array<{
     role: string;
     content: string;
@@ -515,7 +518,24 @@ export class AgentPanel {
   }
 
   handleAgentFrame(msg: any): void {
+    // Correlation is local UI state, never an authentication credential.
+    if (msg.requestId && msg.requestId !== this.activeRequestId) return;
+    if (msg.requestId && !this.isAgentRunning &&
+      ['run_start', 'thinking', 'executing', 'stream_chunk', 'stream_end'].includes(msg.subType)) return;
     switch (msg.subType) {
+      case 'run_start':
+        this.isAgentRunning = true;
+        this.hasConfirmedSession = true;
+        this.updateInputState();
+        break;
+      case 'run_end':
+        this.isAgentRunning = false;
+        this.rejectPendingConfirmation(false);
+        if (this.streamingEl) this.markLastActiveMessageAborted();
+        this.collapseThinkingProcess();
+        this.saveSessionDraft(msg.outcome !== 'completed');
+        this.updateInputState();
+        break;
       case 'thinking':
         this.showThinking(msg.iteration);
         break;
@@ -527,31 +547,32 @@ export class AgentPanel {
         break;
       case 'stream_end':
         this.handleStreamEnd(msg.content);
-        this.isAgentRunning = false;
-        this.updateInputState();
         break;
       case 'response':
-        this.addAgentResponse(msg.content);
-        this.isAgentRunning = false;
-        this.updateInputState();
+        this.addAgentResponse(msg.messageKey ? t(msg.messageKey) : msg.content);
         break;
       case 'confirm_required':
         this.showConfirmDialog(msg.command, msg.reason);
         break;
       case 'error':
-        this.showError(msg.message);
-        this.isAgentRunning = false;
-        this.updateInputState();
+        this.showError(msg.code ? responseErrorMessage(msg.code, msg.status) : msg.message);
+        // Pre-run SSH/auth errors have no run_end; protocol errors do.
+        if (msg.runId == null) {
+          this.isAgentRunning = false;
+          this.updateInputState();
+        }
         break;
       case 'progress_extend':
-        this.showProgressExtend(msg.message, msg.currentIteration, msg.newMax, msg.reason);
+        this.showProgressExtend(t('agent.progressContinue'), msg.currentIteration, msg.newMax, t('agent.progressActive'));
         break;
       case 'reset_done':
+        if (this.isAgentRunning) break;
+        this.activeRequestId = null;
         this.isAgentRunning = false;
         this.updateInputState();
         break;
       case 'memory_updated':
-        this.clearSessionDraft();
+        if (!this.isAgentRunning) this.clearSessionDraft();
         if (this.serverId) {
           void this.fetchServerMemory();
         }
@@ -579,6 +600,7 @@ export class AgentPanel {
     if (!message) return false;
     if (this.isWaitingConfirmation) return false;
 
+    this.activeRequestId = crypto.randomUUID();
     const isSupersede = this.isAgentRunning;
     if (isSupersede) {
       this.markLastActiveMessageAborted();
@@ -604,6 +626,7 @@ export class AgentPanel {
     const payload = {
       type: 'agent_start',
       message: outboundMessage,
+      requestId: this.activeRequestId,
       locale: getLocale(),
       timezone,
       supersede: isSupersede ? true : undefined,
@@ -691,6 +714,8 @@ export class AgentPanel {
   }
 
   private resetPanelState(): void {
+    this.activeRequestId = null;
+    this.hasConfirmedSession = false;
     this.sessionMessages = [];
     this.clearSessionDraft();
     if (this.messagesEl) {
@@ -762,8 +787,30 @@ export class AgentPanel {
       });
   }
 
+  private reactivateThinkingProcess(): void {
+    if (!this.thinkingProcessEl || !this.thinkingIsDone) return;
+    this.thinkingIsDone = false;
+    this.thinkingProcessEl.classList.remove('tp-done', 'tp-expanded');
+
+    const mainIcon = this.thinkingProcessEl.querySelector('.tp-icon') as HTMLElement | null;
+    if (mainIcon) mainIcon.textContent = 'smart_toy';
+
+    const dots = this.thinkingProcessEl.querySelector('.thinking-dots') as HTMLElement | null;
+    if (dots) dots.style.display = '';
+
+    if (this.thinkingStatusEl) {
+      this.thinkingStatusEl.textContent = t('agent.processingSteps', {
+        count: this.thinkingStepCount,
+      });
+    }
+  }
+
   private showThinking(iteration: number): void {
+    if (this.streamingEl) {
+      this.convertStreamToThoughtStep();
+    }
     this.ensureThinkingProcess();
+    this.reactivateThinkingProcess();
     const firstIteration = iteration === 0;
     if (!firstIteration) {
       this.addThinkingStep('thinking', t('agent.thinkingStep', { step: iteration + 1 }));
@@ -777,6 +824,7 @@ export class AgentPanel {
       this.convertStreamToThoughtStep();
     }
     this.ensureThinkingProcess();
+    this.reactivateThinkingProcess();
     const cmd = args?.command || '';
     const label =
       tool === 'ask_user_confirmation'
@@ -881,8 +929,16 @@ export class AgentPanel {
   }
 
   private collapseThinkingProcess(): void {
-    if (!this.thinkingProcessEl || this.thinkingIsDone) return;
+    if (!this.thinkingProcessEl) return;
+    const wasDone = this.thinkingIsDone;
     this.thinkingIsDone = true;
+
+    // 终态下无条件清空外部实时预览容器与缓存，确保折叠时完全收纳
+    if (this.thinkingLiveEl) this.thinkingLiveEl.replaceChildren();
+    this.livePreviewCache = [];
+    this.thinkingProcessEl.classList.add('tp-done');
+
+    if (wasDone) return;
 
     if (this.thinkingCurrentEl?.firstElementChild) {
       this.thinkingStepsEl?.appendChild(this.thinkingCurrentEl.firstElementChild);
@@ -953,7 +1009,7 @@ export class AgentPanel {
     }
     this.collapseThinkingProcess();
     this.sessionMessages.push({ role: 'response', content: content || '' });
-    this.saveSessionDraft(false);
+    this.saveSessionDraft(this.isAgentRunning);
     this.appendMessage('response', content || '');
   }
 
@@ -1017,7 +1073,7 @@ export class AgentPanel {
       }
       this.attachResponseActions(this.streamingEl, finalContent);
       this.sessionMessages.push({ role: 'response', content: finalContent });
-      this.saveSessionDraft(false);
+      this.saveSessionDraft(this.isAgentRunning);
       this.streamingEl = null;
       this.streamingText = '';
     } else {
@@ -1453,7 +1509,8 @@ export class AgentPanel {
       this.handleStop();
     }
 
-    const targetUserIndex = options.userIndex ?? 0;
+    // 若当前会话属于离线草稿加载且尚未在当前连接产生过有效运行轮次，安全归一为第 0 轮
+    const targetUserIndex = this.hasConfirmedSession ? (options.userIndex ?? 0) : 0;
 
     // 1. 删除当前消息之后的所有后续节点（思考、执行、回复等全部清除，无需保留留痕）
     while (el.nextElementSibling) {
@@ -1490,11 +1547,13 @@ export class AgentPanel {
     this.isAgentRunning = true;
     this.updateInputState();
 
-    // 5. 向后端下发带 userIndex 的 agent_start，指示后端截断 state.messages 至目标轮次并重新执行
+    // 5. 响应链从目标用户轮次之前分支；这不会撤销服务器上已经发生的操作。
+    this.activeRequestId = crypto.randomUUID();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     const payload = {
       type: 'agent_start',
       message: newText,
+      requestId: this.activeRequestId,
       locale: getLocale(),
       timezone,
       userIndex: targetUserIndex,
