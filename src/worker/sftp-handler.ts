@@ -1,3 +1,4 @@
+import { getSFTPUploadPolicy } from '../sftp-upload-policy';
 import type { SSHChannel } from '../ssh/channel';
 import { SFTPClient } from '../ssh/sftp';
 import {
@@ -7,6 +8,7 @@ import {
   type SFTPFileAttributes,
   type SFTPFileEntry,
   SSH_FX_EOF,
+  SSH_FX_FAILURE,
   SSH_FX_NO_SUCH_FILE,
   SSH_FX_OK,
   SSH_FXF_CREAT,
@@ -24,7 +26,11 @@ import {
 const DOWNLOAD_CHUNK_SIZE = 128 * 1024;
 const DOWNLOAD_CONCURRENCY = 8;
 const DOWNLOAD_PROGRESS_CHUNKS = 8;
-const UPLOAD_PROGRESS_CHUNKS = 8;
+// Count limits remain independent: tunnel writes use 32KiB chunks (512KiB total),
+// while direct writes retain 128KiB chunks (2MiB total).
+export const MAX_IN_FLIGHT_TUNNEL_WRITES = getSFTPUploadPolicy(true).maxInFlightWrites;
+export const MAX_IN_FLIGHT_DIRECT_WRITES = getSFTPUploadPolicy(false).maxInFlightWrites;
+export const MAX_IN_FLIGHT_UPLOAD_WRITES = MAX_IN_FLIGHT_DIRECT_WRITES; // 兼容别名
 const MAX_SFTP_FILE_SIZE = 500 * 1024 * 1024; // 500MB limit
 const EDITOR_MAX_FILE_SIZE = 2 * 1024 * 1024; // 在线编辑仅限小文本文件
 const BINARY_SNIFF_BYTES = 8192; // 与 Git 一致的空字节嗅探窗口
@@ -46,6 +52,7 @@ type SendEncryptedFn = (payload: Uint8Array) => Promise<void>;
 type SendJSONFn = (msg: any) => void;
 type SendBinaryFn = (data: Uint8Array) => void;
 type SendDebugFn = (message: string) => void;
+type ComputeChecksumFn = (path: string) => Promise<string | null>;
 type SFTPOperation =
   | 'init'
   | 'list'
@@ -67,6 +74,7 @@ export class SFTPHandler {
   private sendBinary: SendBinaryFn;
   private sendDebug: SendDebugFn;
   private debugEnabled: boolean;
+  private computeChecksum?: ComputeChecksumFn;
   private ready: boolean = false;
   private sftpSendQueue: Array<{ data: Uint8Array; offset: number }> = [];
   private sftpSendQueueHead: number = 0;
@@ -77,7 +85,7 @@ export class SFTPHandler {
   private uploadHandle: Uint8Array | null = null;
   private uploadOffset: number = 0;
   private uploadBytesWritten: number = 0;
-  private uploadChunksSinceProgress: number = 0;
+  private uploadBytesSinceProgress: number = 0;
   private uploadTotalSize: number = 0;
   private uploadPath: string = '';
   private uploadWritePromises: Set<Promise<void>> = new Set();
@@ -151,6 +159,10 @@ export class SFTPHandler {
     buf[offset + 3] = val & 0xff;
   }
 
+  private readonly isTunnel: boolean;
+  private readonly maxInFlightWrites: number;
+  private readonly progressBytesThreshold: number;
+
   constructor(
     channelID: number,
     channel: SSHChannel,
@@ -158,7 +170,9 @@ export class SFTPHandler {
     sendJSON: SendJSONFn,
     sendBinary: SendBinaryFn,
     sendDebug: SendDebugFn,
-    debugEnabled: boolean = false
+    debugEnabled: boolean = false,
+    computeChecksum?: ComputeChecksumFn,
+    isTunnel: boolean = false
   ) {
     this.channelID = channelID;
     this.channel = channel;
@@ -168,6 +182,11 @@ export class SFTPHandler {
     this.sendBinary = sendBinary;
     this.sendDebug = sendDebug;
     this.debugEnabled = debugEnabled;
+    this.computeChecksum = computeChecksum;
+    this.isTunnel = isTunnel;
+    const uploadPolicy = getSFTPUploadPolicy(isTunnel);
+    this.maxInFlightWrites = uploadPolicy.maxInFlightWrites;
+    this.progressBytesThreshold = uploadPolicy.progressAckBytes;
 
     this.sftp.setSendCallback(this.channelDataSend);
     this.sftp.setDebugCallback(sendDebug, debugEnabled);
@@ -194,7 +213,7 @@ export class SFTPHandler {
     this.uploadHandle = null;
     this.uploadOffset = 0;
     this.uploadBytesWritten = 0;
-    this.uploadChunksSinceProgress = 0;
+    this.uploadBytesSinceProgress = 0;
     this.uploadTotalSize = 0;
     this.uploadPath = '';
     this.uploadWritePromises.clear();
@@ -210,9 +229,7 @@ export class SFTPHandler {
   }
 
   private trackUploadWrite(writePromise: Promise<void>): Promise<void> {
-    this.uploadWritePromises.add(writePromise);
-
-    writePromise
+    const safePromise = writePromise
       .catch((e) => {
         const error = e instanceof Error ? e : new Error(String(e));
         if (!this.uploadError) {
@@ -221,9 +238,10 @@ export class SFTPHandler {
         }
       })
       .finally(() => {
-        this.uploadWritePromises.delete(writePromise);
+        this.uploadWritePromises.delete(safePromise);
       });
 
+    this.uploadWritePromises.add(safePromise);
     return writePromise;
   }
 
@@ -277,7 +295,7 @@ export class SFTPHandler {
       if (!this.ready) {
         this.ready = true;
         if (this.debugEnabled) this.sendDebug(`[SFTP] Version OK`);
-        this.sendJSON({ type: 'sftp_ready' });
+        this.sendJSON({ type: 'sftp_ready', isTunnel: this.isTunnel });
       }
     } catch (e) {
       this.sendError('init', 'SFTP 版本协商失败: ' + (e instanceof Error ? e.message : String(e)));
@@ -693,7 +711,12 @@ export class SFTPHandler {
   }
 
   // Start file upload
-  async uploadStart(path: string, totalSize: number, overwrite: boolean = false): Promise<void> {
+  async uploadStart(
+    path: string,
+    totalSize: number,
+    overwrite: boolean = false,
+    resumeOffset: number = 0
+  ): Promise<void> {
     if (!this.ready) {
       this.sendError('upload', 'SFTP 未就绪');
       return;
@@ -712,7 +735,9 @@ export class SFTPHandler {
       this.uploadPath = path;
       this.uploadTotalSize = totalSize;
 
-      if (!overwrite) {
+      const isResuming = resumeOffset > 0;
+
+      if (!overwrite && !isResuming) {
         const statResp = await this.sftp.stat(path);
         const statType = statResp[0];
 
@@ -743,9 +768,12 @@ export class SFTPHandler {
         }
       }
 
-      const openFlags = overwrite
-        ? SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC
-        : SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL;
+      // 断点续传时使用 WRITE | CREAT（不带 TRUNC，保留已有文件前缀并从 offset 追加）
+      const openFlags = isResuming
+        ? SSH_FXF_WRITE | SSH_FXF_CREAT
+        : overwrite
+          ? SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC
+          : SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL;
       const openResp = await this.sftp.openFile(path, openFlags);
       const openType = openResp[0];
 
@@ -763,7 +791,20 @@ export class SFTPHandler {
       }
 
       this.uploadHandle = this.sftp.parseHandleResponse(openResp);
-      this.sendJSON({ type: 'sftp_upload_ready', path });
+      if (isResuming) {
+        this.uploadOffset = resumeOffset;
+        this.uploadBytesWritten = resumeOffset;
+      }
+      const readyPayload: Record<string, unknown> = {
+        type: 'sftp_upload_ready',
+        path,
+        isTunnel: this.isTunnel,
+      };
+      if (isResuming) {
+        readyPayload.resumed = true;
+        readyPayload.resumeOffset = resumeOffset;
+      }
+      this.sendJSON(readyPayload);
     } catch (e) {
       this.sendError('upload', '创建文件失败: ' + (e instanceof Error ? e.message : String(e)));
       this.uploadHandle = null;
@@ -779,6 +820,20 @@ export class SFTPHandler {
 
     if (this.uploadError) {
       throw this.uploadError;
+    }
+
+    // Bounded write pipeline: 512KiB in tunnel mode, unchanged 2MiB in direct mode.
+    while (
+      this.uploadWritePromises.size >= this.maxInFlightWrites &&
+      !this.uploadError &&
+      this.uploadHandle
+    ) {
+      if (this.uploadWritePromises.size === 0) break;
+      await Promise.race(Array.from(this.uploadWritePromises));
+    }
+
+    if (!this.uploadHandle || this.uploadError) {
+      return;
     }
 
     const handle = this.uploadHandle;
@@ -797,11 +852,11 @@ export class SFTPHandler {
       }
 
       this.uploadBytesWritten += data.length;
-      this.uploadChunksSinceProgress++;
+      this.uploadBytesSinceProgress += data.length;
 
       if (
         this.uploadTotalSize > 0 &&
-        (this.uploadChunksSinceProgress >= UPLOAD_PROGRESS_CHUNKS ||
+        (this.uploadBytesSinceProgress >= this.progressBytesThreshold ||
           this.uploadBytesWritten >= this.uploadTotalSize)
       ) {
         this.sendJSON({
@@ -809,7 +864,7 @@ export class SFTPHandler {
           loaded: this.uploadBytesWritten,
           total: this.uploadTotalSize,
         });
-        this.uploadChunksSinceProgress = 0;
+        this.uploadBytesSinceProgress = 0;
       }
     })();
 
@@ -817,40 +872,63 @@ export class SFTPHandler {
   }
 
   // Finish upload
-  async uploadEnd(): Promise<void> {
+  async uploadEnd(expectedHash?: string): Promise<void> {
     await this.drainUploadWrites();
 
     const error = this.uploadError;
+    const uploadedPath = this.uploadPath;
+    const uploadedBytes = this.uploadBytesWritten;
 
     await this.closeUploadHandle();
 
     if (error) {
-      await this.removeIncompleteUpload();
+      // 出现错误时保留已写入的部分文件，不调用 removeIncompleteUpload，以便断点续传！
       this.sendError('upload', '上传失败: ' + error.message);
     } else {
-      if (this.uploadTotalSize > 0 && this.uploadChunksSinceProgress > 0) {
+      if (this.uploadTotalSize > 0 && this.uploadBytesSinceProgress > 0) {
         this.sendJSON({
           type: 'sftp_upload_progress',
-          loaded: this.uploadBytesWritten,
+          loaded: uploadedBytes,
           total: this.uploadTotalSize,
         });
       }
-      this.sendJSON({
+
+      let actualHash: string | null = null;
+      let hashMatch: boolean | undefined = undefined;
+
+      if (this.computeChecksum && uploadedPath) {
+        try {
+          actualHash = await this.computeChecksum(uploadedPath);
+          if (actualHash && typeof expectedHash === 'string' && expectedHash.trim()) {
+            hashMatch = actualHash.toLowerCase() === expectedHash.trim().toLowerCase();
+          }
+        } catch {
+          /* 校验为增强特性，异常时不阻断上传成功结果 */
+        }
+      }
+
+      const completePayload: Record<string, unknown> = {
         type: 'sftp_upload_complete',
-        path: this.uploadPath,
-        size: this.uploadBytesWritten,
-      });
+        path: uploadedPath,
+        size: uploadedBytes,
+      };
+      if (actualHash) completePayload.hash = actualHash;
+      if (hashMatch !== undefined) completePayload.hashMatch = hashMatch;
+
+      this.sendJSON(completePayload);
     }
 
     this.resetUploadState();
   }
 
   // Cancel upload
-  async uploadCancel(): Promise<void> {
+  async uploadCancel(deletePartial: boolean = false): Promise<void> {
     try {
       await this.drainUploadWrites();
       await this.closeUploadHandle();
-      await this.removeIncompleteUpload();
+      if (deletePartial) {
+        await this.removeIncompleteUpload();
+      }
     } catch (e) {
       this.sendDebug(
         'SFTP uploadCancel cleanup error: ' + (e instanceof Error ? e.message : String(e))
@@ -937,6 +1015,63 @@ export class SFTPHandler {
     }
   }
 
+  /**
+   * 递归删除非空目录及其内部所有子目录与文件。
+   * 安全防护：
+   * 1. 严格跳过 '.' 与 '..'；
+   * 2. 遇到符号链接（symlink）直接解除链接（removeFile），不递归深入，防止死循环；
+   * 3. 遇到子目录深度优先递归删除；
+   * 4. 清空全部条目后调用 rmdir 删除当前空目录。
+   */
+  private async rmdirRecursive(dirPath: string): Promise<void> {
+    const openResp = await this.sftp.openDir(dirPath);
+    const openType = openResp[0];
+    if (openType === SSH_FXP_STATUS) {
+      const status = this.sftp.parseStatusResponse(openResp);
+      throw new Error(status.message);
+    }
+    if (openType !== SSH_FXP_HANDLE) {
+      throw new Error('打开目录失败');
+    }
+
+    const handle = this.sftp.parseHandleResponse(openResp);
+    let entries: SFTPFileEntry[] = [];
+    try {
+      const result = await this.sftp.listAllEntries(handle);
+      entries = result.entries;
+    } finally {
+      await this.sftp.closeHandle(handle).catch(() => {});
+    }
+
+    for (const entry of entries) {
+      if (entry.filename === '.' || entry.filename === '..') {
+        continue;
+      }
+      const childPath = dirPath === '/' ? `/${entry.filename}` : `${dirPath}/${entry.filename}`;
+      const isDir = getFileTypeFromPermissions(entry.attrs.permissions ?? 0) === 'dir';
+
+      if (isDir) {
+        await this.rmdirRecursive(childPath);
+      } else {
+        const rmResp = await this.sftp.removeFile(childPath);
+        if (rmResp[0] === SSH_FXP_STATUS) {
+          const status = this.sftp.parseStatusResponse(rmResp);
+          if (status.code !== SSH_FX_OK) {
+            throw new Error(`删除文件 ${entry.filename} 失败: ${status.message}`);
+          }
+        }
+      }
+    }
+
+    const rmdirResp = await this.sftp.rmdir(dirPath);
+    if (rmdirResp[0] === SSH_FXP_STATUS) {
+      const status = this.sftp.parseStatusResponse(rmdirResp);
+      if (status.code !== SSH_FX_OK) {
+        throw new Error(status.message);
+      }
+    }
+  }
+
   // Remove directory
   async removeDirectory(path: string): Promise<void> {
     if (!this.ready) {
@@ -945,15 +1080,29 @@ export class SFTPHandler {
     }
 
     try {
+      // 优先尝试标准 rmdir（若为空目录直接高效删除）
       const resp = await this.sftp.rmdir(path);
       const type = resp[0];
 
       if (type === SSH_FXP_STATUS) {
         const status = this.sftp.parseStatusResponse(resp);
-        if (status.code !== SSH_FX_OK) {
-          this.sendError('rmdir', status.message);
+        if (status.code === SSH_FX_OK) {
+          this.sendJSON({ type: 'sftp_rmdir_result', path, success: true });
           return;
         }
+
+        // 若返回 Failure（POSIX rmdir 对非空目录返回 ENOTEMPTY），自动转入深度递归删除！
+        if (status.code === SSH_FX_FAILURE || status.message === 'Failure') {
+          if (this.debugEnabled) {
+            this.sendDebug(`[SFTP] rmdir failed with Failure, attempting recursive deletion for: ${path}`);
+          }
+          await this.rmdirRecursive(path);
+          this.sendJSON({ type: 'sftp_rmdir_result', path, success: true });
+          return;
+        }
+
+        this.sendError('rmdir', status.message);
+        return;
       }
 
       this.sendJSON({ type: 'sftp_rmdir_result', path, success: true });

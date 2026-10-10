@@ -21,6 +21,11 @@ export function isValidTunnelHostname(host: string): boolean {
   );
 }
 
+// cloudflared 2026.9.3/2026.10.0 TCP-over-WebSocket uses a 16KiB copy buffer.
+// Conn.Read copies a whole message into it without retaining an oversized tail.
+// Cap the encrypted carrier message, NOT just the SSH channel data payload.
+const MAX_TUNNEL_WEBSOCKET_MESSAGE_BYTES = 16 * 1024;
+
 /**
  * A minimal Socket-compatible duplex byte stream backed by an outbound
  * Cloudflare Tunnel WebSocket connection.
@@ -33,12 +38,16 @@ export class TunnelWebSocketStream {
 
   private controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   private isClosed = false;
+  private lastWriteTime = 0;
 
   private readonly onMessage: (event: MessageEvent) => void;
-  private readonly onClose: () => void;
-  private readonly onError: () => void;
+  private readonly onClose: (event?: any) => void;
+  private readonly onError: (event?: any) => void;
 
-  constructor(private readonly ws: WebSocket) {
+  constructor(
+    private readonly ws: WebSocket,
+    private readonly onDebug?: (msg: string) => void
+  ) {
     // Ensure binary frames arrive as ArrayBuffer
     this.ws.binaryType = 'arraybuffer';
 
@@ -67,11 +76,16 @@ export class TunnelWebSocketStream {
       }
     };
 
-    this.onClose = () => {
+    this.onClose = (event?: any) => {
+      const code = event && typeof event.code === 'number' ? event.code : 1000;
+      const reason = event && typeof event.reason === 'string' ? event.reason : '';
+      this.onDebug?.(`[TunnelWS] closed: code=${code}, reason=${reason || '(none)'}`);
       this.closeStream();
     };
 
-    this.onError = () => {
+    this.onError = (event?: any) => {
+      const msg = event instanceof Error ? event.message : 'Tunnel WebSocket connection error';
+      this.onDebug?.(`[TunnelWS] error: ${msg}`);
       this.closeStream(new Error('Tunnel WebSocket connection error'));
     };
 
@@ -89,12 +103,29 @@ export class TunnelWebSocketStream {
     });
 
     this.writable = new WritableStream<Uint8Array>({
-      write: (data) => {
+      write: async (data) => {
         if (this.isClosed) {
           throw new Error('Tunnel WebSocket is closed');
         }
         try {
-          this.ws.send(data);
+          // WebSocket message boundaries are independent of SSH packet boundaries.
+          // Split AFTER encryption so headers, padding and MAC/tag bytes also fit.
+          // The serialized WritableStream preserves every byte's original order.
+          for (let offset = 0; offset < data.length; offset += MAX_TUNNEL_WEBSOCKET_MESSAGE_BYTES) {
+            const frame = data.subarray(offset, offset + MAX_TUNNEL_WEBSOCKET_MESSAGE_BYTES);
+            if (frame.length >= 8192) {
+              const elapsed = Date.now() - this.lastWriteTime;
+              if (elapsed < 2) {
+                await new Promise((resolve) => setTimeout(resolve, 2 - elapsed));
+              }
+              this.lastWriteTime = Date.now();
+            }
+            // The connection can close while waiting between carrier messages.
+            if (this.isClosed) {
+              throw new Error('Tunnel WebSocket is closed');
+            }
+            this.ws.send(frame);
+          }
         } catch (err) {
           this.closeStream(err instanceof Error ? err : new Error(String(err)));
           throw err;
