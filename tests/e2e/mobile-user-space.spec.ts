@@ -215,6 +215,22 @@ test('移动端用户空间提供自定义快捷键入口且桌面端隐藏', as
   await expect(modal).toBeVisible();
   await expect(page.locator('#mobile-shortcuts-presets')).toBeVisible();
 
+  // 自定义按键的名称与发送内容输入框均应完整可见，文案为“按键名称”/“发送内容”，小字号 11px，且内容输入框不被挤扁
+  const labelInput = page.locator('#mobile-shortcut-custom-label');
+  const valueInput = page.locator('#mobile-shortcut-custom-value');
+  await expect(labelInput).toBeVisible();
+  await expect(valueInput).toBeVisible();
+  await expect(labelInput).toHaveAttribute('placeholder', '按键名称');
+  await expect(valueInput).toHaveAttribute('placeholder', '发送内容');
+  const labelBox = await labelInput.boundingBox();
+  const valueBox = await valueInput.boundingBox();
+  expect(labelBox?.width).toBeCloseTo(96, 1);
+  expect(valueBox?.width).toBeGreaterThan(80);
+  const labelFontSize = await labelInput.evaluate((el) => getComputedStyle(el).fontSize);
+  const valueFontSize = await valueInput.evaluate((el) => getComputedStyle(el).fontSize);
+  expect(labelFontSize).toBe('11px');
+  expect(valueFontSize).toBe('11px');
+
   // 关闭弹窗
   await page.locator('#mobile-shortcuts-modal .panel-close-btn').click();
   await expect(modal).toBeHidden();

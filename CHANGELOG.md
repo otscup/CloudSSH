@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.5] - 2026-10-13
+
+### Fixed
+
+- **移动端自定义快捷键输入框多主题挤压修复**：修复按键名称输入框被全局 `.terminal-input { width: 100% }` 覆盖而霸占整行宽度，导致右侧发送内容输入框被 Flex 压缩至 0 像素的问题（在赛博朋克主题下表现为发送内容输入框隐形丢失，在 Liquid/Standard/Soft 等盒装主题下表现为渲染出空心小方块）。
+
+### Changed
+
+- **移动端自定义按键文案与字号紧凑化**：将按键名称与发送内容占位符精简为「按键名称」/「发送内容」（同步对齐 `zh-CN` / `zh-TW` / `en-US` 三端语言），输入框字号调整为紧凑的 `11px` 并优化内边距，确保窄屏与多主题环境下文案完整显示、不被截断；补齐单测源码守护断言与 Playwright E2E 布局校验。
+
 ## [2.6.4] - 2026-10-12
 
 ### Changed

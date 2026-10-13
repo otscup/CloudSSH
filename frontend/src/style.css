@@ -4788,3 +4788,24 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   color: var(--primary);
 }
 
+/*
+ * 自定义按键输入框：等宽小字号 (11px)，确保紧凑面板内文案不被截断。
+ * 必须带 !important 压过全局移动端输入规则 input:not(...){font-size:16px!important}。
+ */
+#mobile-shortcut-custom-label,
+#mobile-shortcut-custom-value {
+  font-size: 11px !important;
+  padding: 4px 8px;
+}
+
+#mobile-shortcut-custom-label::placeholder,
+#mobile-shortcut-custom-value::placeholder {
+  font-size: 11px;
+}
+
+#mobile-shortcut-custom-label {
+  width: 96px;
+  flex: 0 0 96px;
+}
+
+

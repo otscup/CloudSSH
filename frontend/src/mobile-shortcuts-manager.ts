@@ -233,7 +233,7 @@ export class MobileShortcutsManager {
     customLabelInput.id = 'mobile-shortcut-custom-label';
     customLabelInput.type = 'text';
     customLabelInput.maxLength = SHORTCUT_LABEL_MAX_LENGTH;
-    customLabelInput.className = 'terminal-input w-24 text-xs font-mono';
+    customLabelInput.className = 'terminal-input !w-24 shrink-0 text-[11px] font-mono';
     customLabelInput.dataset.i18nPlaceholder = 'mobileShortcuts.customLabelPlaceholder';
     customLabelInput.placeholder = t('mobileShortcuts.customLabelPlaceholder');
 
@@ -241,7 +241,7 @@ export class MobileShortcutsManager {
     customValueInput.id = 'mobile-shortcut-custom-value';
     customValueInput.type = 'text';
     customValueInput.maxLength = SHORTCUT_VALUE_MAX_LENGTH;
-    customValueInput.className = 'terminal-input flex-1 min-w-0 text-xs font-mono';
+    customValueInput.className = 'terminal-input flex-1 min-w-0 text-[11px] font-mono';
     customValueInput.dataset.i18nPlaceholder = 'mobileShortcuts.customValuePlaceholder';
     customValueInput.placeholder = t('mobileShortcuts.customValuePlaceholder');
 
