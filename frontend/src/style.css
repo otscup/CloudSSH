@@ -65,7 +65,9 @@
      否则全高浮层会盖住顶栏的分段切换器，导致抽屉之间无法直接切换。
      移动端在响应式区块中复位为 0。 */
   --drawer-top: 4rem;
-  --shadow-card: none;
+  /* 隐形但合法的阴影（非 none）：none 与其他阴影层组合会使整条 box-shadow
+     声明非法被丢弃（hover 辉光、fx-glow 叠加均受影响），故用零透明阴影占位 */
+  --shadow-card: 0 0 0 0 rgba(0, 0, 0, 0);
   --shadow-modal: 0 18px 52px rgba(0, 0, 0, 0.48);
   --shadow-floating: 0 8px 28px rgba(0, 0, 0, 0.34);
   --surface-blur: 0px;
@@ -76,6 +78,15 @@
   --hover-lift: -2px;
   --visual-viewport-height: 100vh;
   --visual-viewport-offset-top: 0px;
+  /* 质感层：指针聚光 / 内缘微光 / 交错入场 / 按压回弹，全主题语义化 */
+  --spotlight-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  --spotlight-opacity: 1;
+  --edge-highlight: color-mix(in srgb, var(--on-surface) 8%, transparent);
+  --stagger-step: 45ms;
+  --press-scale: 0.97;
+  /* 弹簧缓动：带轻微过冲的用于弹窗/抽屉/菜单，无过冲的用于整页视图与卡片入场 */
+  --spring-ease: cubic-bezier(0.34, 1.3, 0.64, 1);
+  --spring-ease-gentle: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 @supports (height: 100dvh) {
@@ -144,7 +155,7 @@ html[data-ui-font="system"] {
 }
 
 html[data-ui-shadow="none"] {
-  --shadow-card: none;
+  --shadow-card: 0 0 0 0 rgba(0, 0, 0, 0);
   --shadow-modal: none;
   --shadow-floating: none;
   --surface-blur: 0px;
@@ -182,6 +193,9 @@ html[data-ui-motion="none"] {
   --motion-normal: 0ms;
   --motion-slow: 0ms;
   --hover-lift: 0px;
+  --spotlight-opacity: 0;
+  --stagger-step: 0ms;
+  --press-scale: 1;
 }
 
 html[data-ui-motion="reduced"] {
@@ -189,6 +203,7 @@ html[data-ui-motion="reduced"] {
   --motion-normal: 140ms;
   --motion-slow: 180ms;
   --hover-lift: -1px;
+  --stagger-step: 20ms;
 }
 
 html[data-ui-motion="full"] {
@@ -346,6 +361,11 @@ html[data-fx-glow='on'] .cyber-button {
 body.terminal-active {
   overflow: hidden;
   overscroll-behavior: none;
+}
+
+/* 关闭 iOS/Android 原生点击灰色闪烁：按压反馈统一由各组件 :active 态表达 */
+html {
+  -webkit-tap-highlight-color: transparent;
 }
 
 #terminal-section {
@@ -562,6 +582,11 @@ select optgroup {
   color: var(--on-accent);
 }
 
+/* 按压回弹：--press-scale 随 motion 档位收敛（none 时为 1 即禁用） */
+.cyber-button:active:not(:disabled) {
+  transform: scale(var(--press-scale));
+}
+
 .connect-btn {
   border: 1px solid var(--accent);
   border-radius: var(--control-radius);
@@ -664,6 +689,20 @@ select optgroup {
 
 #agent-input::-webkit-scrollbar {
   display: none; /* WebKit (Chrome/Safari) */
+}
+
+/* ==================== 键盘焦点环 ====================
+   全局 :focus-visible 仅在键盘导航时触发（鼠标/触摸不触发），
+   统一为主题色光环；组件级自定义焦点样式特异性更高，不受影响 */
+:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 65%, transparent);
+  outline-offset: 2px;
+}
+
+/* 终端渲染区不显示焦点环（xterm 内部辅助 textarea 频繁持焦） */
+.xterm :focus-visible,
+.xterm:focus-visible {
+  outline: none;
 }
 
 /* Agent 待发送终端选区 */
@@ -792,6 +831,28 @@ select optgroup {
   font-size: 10px;
 }
 
+/* 消息入场：一次性弹簧上浮，恢复会话草稿批量渲染同样适用 */
+.agent-message {
+  animation: agent-msg-in var(--motion-normal) var(--spring-ease-gentle) backwards;
+}
+
+@keyframes agent-msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-message {
+    animation: none;
+  }
+}
+
 .agent-message-context .material-symbols-outlined {
   font-size: 13px;
 }
@@ -883,12 +944,338 @@ select optgroup {
   margin-top: auto;
 }
 
-.server-card:hover {
+/* 悬停反馈必须压过组件变体预设（data-component-card 的静态 border/shadow
+   特异性为 (0,2,1)，曾把 hover 的强调边框与辉光整体静默覆盖） */
+.server-card:hover,
+html[data-component-card] .server-card:hover {
   border-color: var(--accent);
   transform: translateY(var(--hover-lift));
   box-shadow:
     var(--shadow-card),
-    0 4px 20px var(--accent-glow);
+    0 4px 20px var(--accent-glow),
+    inset 0 1px 0 var(--edge-highlight);
+}
+
+/* 触摸/鼠标按压反馈：轻缩放即可，移动端无 hover 时的主要交互确认 */
+.server-card:active,
+html[data-component-card] .server-card:active {
+  transform: scale(0.98);
+  transition-duration: var(--motion-fast);
+}
+
+/* 指针聚光（全主题）：--mx / --my 由 main.ts 的 rAF 节流追踪写入。
+   用 ::after 承载（::before 留给 liquid 风格的镜面天光），软光覆盖在内容之上。 */
+html:not([data-ui-style='liquid']) .server-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(
+    240px circle at var(--mx, 50%) var(--my, 0%),
+    var(--spotlight-color),
+    transparent 65%
+  );
+  opacity: 0;
+  transition: opacity var(--motion-normal) ease;
+  z-index: 1;
+}
+
+html:not([data-ui-style='liquid']) .server-card:hover::after {
+  opacity: var(--spotlight-opacity);
+}
+
+@media (hover: none) and (pointer: coarse) {
+  html:not([data-ui-style='liquid']) .server-card::after {
+    display: none;
+  }
+}
+
+/* 交错入场：--stagger-index 由渲染层按卡片序号写入；
+   motion=none 时 --motion-slow 归零即瞬时完成，系统级减少动态则整体关闭 */
+.server-card--enter {
+  animation: server-card-enter var(--motion-slow) cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: calc(var(--stagger-index, 0) * var(--stagger-step));
+}
+
+@keyframes server-card-enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .server-card--enter {
+    animation: none;
+  }
+}
+
+/* 骨架屏：服务器列表冷加载占位，闪烁微光复用主题表面色 */
+.skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--shadow-card);
+  padding: var(--card-padding);
+}
+
+.skeleton-line {
+  height: 12px;
+  border-radius: var(--control-radius);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--on-surface) 7%, transparent) 25%,
+    color-mix(in srgb, var(--on-surface) 14%, transparent) 50%,
+    color-mix(in srgb, var(--on-surface) 7%, transparent) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s linear infinite;
+}
+
+@keyframes skeleton-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+html[data-ui-motion='none'] .skeleton-line {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-line {
+    animation: none;
+  }
+}
+
+/* ==================== SFTP 文件列表微交互 ====================
+   行级交错入场（--stagger-index 由渲染层写入，大目录自动降级）、
+   指针聚光灯（复用 --mx/--my 追踪，与服务器卡片同一令牌体系）、
+   传输进度条流光。 */
+.sftp-entry {
+  position: relative;
+  overflow: hidden;
+}
+
+.sftp-entry--enter {
+  animation: sftp-entry-in var(--motion-normal) var(--spring-ease-gentle) backwards;
+  animation-delay: calc(var(--stagger-index, 0) * var(--stagger-step));
+}
+
+@keyframes sftp-entry-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+html:not([data-ui-style='liquid']) .sftp-entry::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    120px circle at var(--mx, 50%) var(--my, 50%),
+    var(--spotlight-color),
+    transparent 70%
+  );
+  opacity: 0;
+  transition: opacity var(--motion-normal) ease;
+  pointer-events: none;
+}
+
+html:not([data-ui-style='liquid']) .sftp-entry:hover::after {
+  opacity: var(--spotlight-opacity);
+}
+
+/* 抽屉滚动容器：滚到边界不再把滚动穿透给背景页（移动端橡皮筋防连带） */
+#sftp-file-list,
+#agent-messages,
+#snippet-list {
+  overscroll-behavior-y: contain;
+}
+
+@keyframes mobile-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-more-menu:not(.hidden) {
+    animation: none;
+  }
+}
+
+/* 触屏按压反馈：无 hover 时给即时的选中色确认 */
+.sftp-entry:active {
+  background-color: var(--accent-bg);
+}
+
+@media (hover: none) and (pointer: coarse) {
+  html:not([data-ui-style='liquid']) .sftp-entry::after {
+    display: none;
+  }
+
+  /* 触屏行触控目标加高（约 36px 行高），桌面密度不变 */
+  .sftp-entry {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sftp-entry--enter {
+    animation: none;
+  }
+}
+
+/* 传输进度条流光：进行中持续扫过一道高光，motion=none 时静态 */
+#sftp-progress-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+#sftp-progress-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.28) 50%, transparent 100%);
+  transform: translateX(-100%);
+  animation: progress-sheen 1.6s var(--spring-ease-gentle) infinite;
+  pointer-events: none;
+}
+
+@keyframes progress-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+html[data-ui-motion='none'] #sftp-progress-bar::after {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #sftp-progress-bar::after {
+    animation: none;
+  }
+}
+
+/* ==================== 空状态徽章 ====================
+   图标置于主题色圆形徽章中，替代裸图标，统一服务器列表 / SFTP / 片段库空状态 */
+.empty-state-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 16px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: 50%;
+  box-shadow:
+    0 0 24px color-mix(in srgb, var(--accent) 12%, transparent),
+    inset 0 1px 0 var(--edge-highlight);
+  animation: view-enter var(--motion-normal) var(--spring-ease-gentle) backwards;
+}
+
+.empty-state-badge .material-symbols-outlined {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .empty-state-badge {
+    animation: none;
+  }
+}
+
+/* ==================== 认证页氛围层（Auth Aurora） ====================
+   双团低透明度主题色光晕，blur 柔化 + 缓慢漂移，z 序位于表单（z-10）之下 */
+.auth-aurora {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.auth-aurora::before,
+.auth-aurora::after {
+  content: '';
+  position: absolute;
+  width: 55vmax;
+  height: 55vmax;
+  border-radius: 50%;
+  filter: blur(80px);
+}
+
+.auth-aurora::before {
+  top: -18%;
+  left: -12%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent) 16%, transparent),
+    transparent 70%
+  );
+  animation: auth-aurora-drift 26s ease-in-out infinite alternate;
+}
+
+.auth-aurora::after {
+  right: -14%;
+  bottom: -22%;
+  background: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--accent-secondary) 14%, transparent),
+    transparent 70%
+  );
+  animation: auth-aurora-drift 32s ease-in-out infinite alternate-reverse;
+}
+
+@keyframes auth-aurora-drift {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    transform: translate3d(6%, 8%, 0) scale(1.12);
+  }
+}
+
+html[data-ui-motion='none'] .auth-aurora::before,
+html[data-ui-motion='none'] .auth-aurora::after {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-aurora::before,
+  .auth-aurora::after {
+    animation: none;
+  }
+}
+
+/* 认证面板：用主题化 modal 阴影替代固定黑色 shadow-2xl，叠加内缘微光 */
+#auth-section .cyber-box {
+  box-shadow:
+    var(--shadow-modal),
+    inset 0 1px 0 var(--edge-highlight);
 }
 
 /* 卡片删除动画 */
@@ -914,8 +1301,8 @@ select optgroup {
 
 .app-toast-container {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
   z-index: 300;
   display: flex;
   width: min(380px, calc(100vw - 32px));
@@ -940,10 +1327,10 @@ select optgroup {
   -webkit-backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
   backdrop-filter: blur(var(--surface-blur)) saturate(var(--surface-saturate, 100%));
   opacity: 0;
-  transform: translateX(18px);
+  transform: translateX(24px) scale(0.97);
   transition:
     opacity var(--motion-normal) ease,
-    transform var(--motion-normal) ease;
+    transform var(--motion-normal) var(--spring-ease);
   pointer-events: auto;
 }
 
@@ -958,11 +1345,13 @@ select optgroup {
 }
 .app-toast--visible {
   opacity: 1;
-  transform: translateX(0);
+  transform: translateX(0) scale(1);
 }
 .app-toast--leaving {
   opacity: 0;
-  transform: translateX(18px);
+  transform: translateX(18px) scale(0.98);
+  transition-duration: var(--motion-fast);
+  transition-timing-function: cubic-bezier(0.4, 0, 1, 1);
 }
 
 .app-toast__icon {
@@ -1040,7 +1429,7 @@ select optgroup {
 }
 
 .app-dialog[open] .app-dialog__panel {
-  animation: app-dialog-in var(--motion-normal) ease-out;
+  animation: app-dialog-in var(--motion-normal) var(--spring-ease);
 }
 
 .app-dialog__panel {
@@ -1214,7 +1603,7 @@ select optgroup {
 }
 
 .auth-challenge-dialog[open] .auth-challenge-dialog__panel {
-  animation: app-dialog-in var(--motion-normal) ease-out;
+  animation: app-dialog-in var(--motion-normal) var(--spring-ease);
 }
 
 .auth-challenge-dialog__panel {
@@ -1433,7 +1822,7 @@ select optgroup {
 @keyframes app-dialog-in {
   from {
     opacity: 0;
-    transform: translateY(10px) scale(0.98);
+    transform: translateY(14px) scale(0.96);
   }
   to {
     opacity: 1;
@@ -1452,9 +1841,9 @@ select optgroup {
 
 @media (max-width: 520px) {
   .app-toast-container {
-    right: 12px;
-    bottom: 12px;
-    width: calc(100vw - 24px);
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(12px, env(safe-area-inset-bottom));
+    width: calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right));
   }
   .app-dialog {
     width: calc(100vw - 24px);
@@ -1645,11 +2034,16 @@ select optgroup {
   transition:
     color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
-    border-color var(--motion-fast) ease;
+    border-color var(--motion-fast) ease,
+    transform var(--motion-fast) var(--spring-ease);
   white-space: nowrap;
   max-width: 180px;
   position: relative;
   flex-shrink: 0;
+}
+
+.tab-item:active {
+  transform: scale(0.95);
 }
 
 .tab-item:hover {
@@ -1696,6 +2090,122 @@ select optgroup {
   line-height: 20px;
   border-radius: 2px;
   outline: none;
+}
+
+/* 新标签入场：仅首次渲染该 tab id 时由 TabManager 挂类（renderTabBar 全量重建，
+   状态刷新不会重放）；exit 类由 closeTab 挂载并配合渲染抑制在动画结束后重排 */
+.tab-item--enter {
+  animation: tab-item-in var(--motion-normal) var(--spring-ease) backwards;
+}
+
+@keyframes tab-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.tab-item--exit {
+  animation: tab-item-out var(--motion-fast) ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes tab-item-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+/* 激活指示条：仅活跃标签切换当次渲染挂类（避免状态刷新反复重放） */
+.tab-item--activate.active::after {
+  animation: tab-indicator-in var(--motion-fast) ease-out;
+}
+
+@keyframes tab-indicator-in {
+  from {
+    transform: scaleX(0.3);
+    opacity: 0;
+  }
+  to {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+/* 标签右键菜单：弹簧弹出，transform-origin 跟随左上角锚点 */
+#tab-context-menu {
+  animation: ctx-menu-in var(--motion-fast) var(--spring-ease) backwards;
+  transform-origin: top left;
+}
+
+@keyframes ctx-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tab-item--enter,
+  .tab-item--exit,
+  .tab-item--activate.active::after,
+  #tab-context-menu {
+    animation: none;
+  }
+}
+
+/* ==================== 主视图切换过渡 ====================
+   hidden ↔ flex 的 display 切换会自动重播动画，无需 JS 挂类。
+   注意：#terminal-section 内部托管 position:fixed 的抽屉面板（SFTP/Agent/自定义命令），
+   祖先 transform 会改变 fixed 的包含块导致面板偏移，因此终端视图只做淡入不做位移。 */
+#auth-section,
+#user-space-section {
+  animation: view-enter var(--motion-normal) var(--spring-ease-gentle) backwards;
+}
+
+#terminal-section {
+  animation: view-enter-fade var(--motion-normal) ease-out backwards;
+}
+
+@keyframes view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes view-enter-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #auth-section,
+  #user-space-section,
+  #terminal-section {
+    animation: none;
+  }
 }
 
 .network-latency-item {
@@ -2847,6 +3357,10 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   min-width: 0;
   top: var(--drawer-top);
   height: calc(100% - var(--drawer-top));
+  /* 覆盖各面板内联的 Tailwind duration-300 ease-in-out：ID 特异性统一接管，
+     弹簧滑入滑出与抽屉分段透镜的物理语言一致；motion 档位经 --motion-slow 收敛 */
+  transition-duration: var(--motion-slow);
+  transition-timing-function: var(--spring-ease);
 }
 
 /* 自定义命令抽屉的遮罩同样让出顶栏，否则它会吃掉顶栏切换器的点击。 */
@@ -4016,6 +4530,12 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
     border: 1px solid var(--border-strong);
     border-radius: var(--modal-radius);
     box-shadow: var(--shadow-floating);
+    transform-origin: top right;
+  }
+
+  /* hidden→flex 切换自动重播的入场动效（弹簧，一次性） */
+  .mobile-more-menu:not(.hidden) {
+    animation: mobile-menu-in var(--motion-normal) var(--spring-ease) backwards;
   }
 
   .mobile-more-menu > button,
@@ -4212,6 +4732,23 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
 
   .agent-panel-header {
     min-height: 48px;
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+
+  /* 头部右侧按钮组收紧，为标题腾出空间 */
+  .agent-panel-header > div:last-child {
+    gap: 4px;
+  }
+
+  .agent-panel-title {
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
+
+  .agent-mode-btn {
+    padding: 1px 5px;
+    gap: 2px;
   }
 
   .agent-close-button {
@@ -4243,6 +4780,19 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   .agent-desktop-close,
   .agent-header-btn .agent-desktop-close {
     display: none;
+  }
+
+  /* 特异性须压过基础规则 .agent-header-btn .material-symbols-outlined:not(...) 的
+     display: block（(0,3,0)），否则桌面 X 图标在移动端泄漏并被挤出屏幕 */
+  .agent-header-btn .material-symbols-outlined.agent-desktop-close {
+    display: none;
+  }
+
+  /* 快捷提示词方块：移动端换行自适应铺满，不再横向滚动裁切 */
+  #agent-quick-chips {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    overflow-x: visible;
   }
 
   .agent-quick-chip {
@@ -4306,6 +4856,13 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
 
   .cloudssh-search-box {
     max-width: calc(100% - 8px);
+  }
+}
+
+/* 窄屏手机：Agent 头部模式切换只留文字标签，避免标题被挤出 */
+@media (max-width: 520px) {
+  .agent-mode-btn .material-symbols-outlined {
+    display: none;
   }
 }
 

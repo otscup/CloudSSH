@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { blockOptionalThirdPartyAssets } from './helpers';
 
 test('强制 GitHub 登录模式隐藏匿名连接表单', async ({ page }) => {

@@ -10,6 +10,7 @@ import {
   type UnifiedServerMemory,
 } from '../../../src/server-memory-schema';
 import { copyTextToClipboard } from '../clipboard';
+import { attachDrawerSwipeToClose } from '../drawer-swipe';
 import { getLocale, onLocaleChange, t, translateDocument } from '../i18n';
 import { confirmAction, notify } from '../ui-feedback';
 import { getTerminalFillCommand, normalizeCodeLanguage } from './code-actions';
@@ -104,6 +105,7 @@ export class AgentPanel {
   private autoConfirmTimer: number | null = null;
   private autoConfirmInterval: number | null = null;
   private pendingConfirmation: {
+    confirmationId: string;
     command: string;
     element: HTMLElement;
     previousFocus: HTMLElement | null;
@@ -243,7 +245,7 @@ export class AgentPanel {
         <div class="agent-panel-header flex items-center justify-between px-4 h-12 border-b border-[var(--border)] bg-[var(--bg-elevated)] shrink-0">
           <div class="flex items-center gap-2 min-w-0">
             <span class="material-symbols-outlined text-[var(--accent-secondary)]" style="font-size: 18px; font-variation-settings: 'FILL' 1;">smart_toy</span>
-            <span class="text-xs font-bold tracking-[0.1em] text-[var(--accent-secondary)] truncate" data-i18n="agent.title">AI Agent 助手</span>
+            <span class="agent-panel-title text-xs font-bold tracking-[0.1em] text-[var(--accent-secondary)] truncate" data-i18n="agent.title">AI Agent 助手</span>
           </div>
           <div class="flex items-center gap-1.5">
             <div id="agent-mode-control" class="agent-mode-segmented" role="radiogroup" aria-label="Agent execution mode" data-active-mode="${this.agentMode}">
@@ -356,6 +358,10 @@ export class AgentPanel {
     });
 
     this.parentEl.appendChild(this.panelEl);
+    attachDrawerSwipeToClose(this.panelEl, {
+      headerSelector: '.agent-panel-header',
+      onClose: () => this.hide(),
+    });
     this.messagesEl = this.panelEl.querySelector('#agent-messages');
     this.contextEl = this.panelEl.querySelector('#agent-context');
     this.inputEl = this.panelEl.querySelector('#agent-input') as HTMLTextAreaElement;
@@ -552,7 +558,12 @@ export class AgentPanel {
         this.addAgentResponse(msg.messageKey ? t(msg.messageKey) : msg.content);
         break;
       case 'confirm_required':
-        this.showConfirmDialog(msg.command, msg.reason);
+        this.showConfirmDialog(msg.command, msg.reason, msg.confirmationId);
+        break;
+      case 'confirm_closed':
+        if (this.pendingConfirmation?.confirmationId === msg.confirmationId) {
+          this.resolvePendingConfirmation(false, false, msg.confirmationId, false);
+        }
         break;
       case 'error':
         this.showError(msg.code ? responseErrorMessage(msg.code, msg.status) : msg.message);
@@ -1067,8 +1078,13 @@ export class AgentPanel {
         // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
         tmp.innerHTML = this.renderMarkdown(finalContent);
         const inner = tmp.querySelector('.agent-md-content');
-        // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
-        contentEl.innerHTML = inner ? inner.innerHTML : finalContent;
+        if (inner) {
+          // Sanitized renderMarkdown output only; missing wrapper falls back to text.
+          // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+          contentEl.innerHTML = inner.innerHTML;
+        } else {
+          contentEl.textContent = finalContent;
+        }
         this.enhanceCodeBlocks(contentEl);
       }
       this.attachResponseActions(this.streamingEl, finalContent);
@@ -1120,7 +1136,12 @@ export class AgentPanel {
     this.scrollToBottom();
   }
 
-  private showConfirmDialog(command: string, reason: string): void {
+  private showConfirmDialog(command: string, reason: string, confirmationId: unknown): void {
+    if (typeof confirmationId !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/.test(confirmationId)) {
+      // Fail closed for legacy/malformed requests; never send an unbound approval.
+      this.wsSend?.(JSON.stringify({ type: 'agent_confirm', approved: false, command, confirmationId }));
+      return;
+    }
     this.clearAutoConfirmTimers();
     if (this.streamingEl) {
       this.convertStreamToThoughtStep();
@@ -1128,7 +1149,7 @@ export class AgentPanel {
     const terminalSectionHidden =
       document.getElementById('terminal-section')?.classList.contains('hidden') ?? false;
     if (!this.isVisible || this.parentEl.style.display === 'none' || terminalSectionHidden) {
-      this.wsSend?.(JSON.stringify({ type: 'agent_confirm', approved: false, command }));
+      this.wsSend?.(JSON.stringify({ type: 'agent_confirm', approved: false, command, confirmationId }));
       return;
     }
     this.rejectPendingConfirmation(false);
@@ -1175,22 +1196,23 @@ export class AgentPanel {
     const rejectButton = el.querySelector<HTMLButtonElement>('.agent-confirm-no')!;
     const confirmButton = el.querySelector<HTMLButtonElement>('.agent-confirm-yes')!;
     this.pendingConfirmation = {
+      confirmationId,
       command,
       element: el,
       previousFocus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
     };
 
     rejectButton.addEventListener('click', () => {
-      this.resolvePendingConfirmation(false);
+      this.resolvePendingConfirmation(false, true, confirmationId);
     });
     confirmButton.addEventListener('click', () => {
-      this.resolvePendingConfirmation(true);
+      this.resolvePendingConfirmation(true, true, confirmationId);
     });
     el.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        this.resolvePendingConfirmation(false);
+        this.resolvePendingConfirmation(false, true, confirmationId);
         return;
       }
       if (event.key !== 'Tab') return;
@@ -1220,6 +1242,7 @@ export class AgentPanel {
       }
 
       this.autoConfirmInterval = window.setInterval(() => {
+        if (this.pendingConfirmation?.confirmationId !== confirmationId) return;
         remaining -= 1;
         if (remaining > 0 && confirmButton.isConnected) {
           confirmButton.textContent = t('agent.confirmAutoCountdown', { seconds: remaining });
@@ -1232,25 +1255,24 @@ export class AgentPanel {
       }, 1000);
 
       this.autoConfirmTimer = window.setTimeout(() => {
+        if (this.pendingConfirmation?.confirmationId !== confirmationId) return;
         this.clearAutoConfirmTimers();
-        if (this.pendingConfirmation?.command === command) {
-          this.resolvePendingConfirmation(true);
-        }
+        this.resolvePendingConfirmation(true, true, confirmationId);
       }, 3000);
     }
   }
 
-  private resolvePendingConfirmation(approved: boolean, restoreFocus = true): void {
-    this.clearAutoConfirmTimers();
+  private resolvePendingConfirmation(
+    approved: boolean, restoreFocus = true, expectedId?: string, notifyServer = true
+  ): void {
     const pending = this.pendingConfirmation;
-    if (!pending) return;
-
+    if (!pending || (expectedId !== undefined && pending.confirmationId !== expectedId)) return;
+    this.clearAutoConfirmTimers();
     this.pendingConfirmation = null;
-    this.wsSend?.(
+    if (notifyServer) this.wsSend?.(
       JSON.stringify({
-        type: 'agent_confirm',
-        approved,
-        command: pending.command,
+        type: 'agent_confirm', confirmationId: pending.confirmationId,
+        approved, command: pending.command,
       })
     );
     pending.element.remove();

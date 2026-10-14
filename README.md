@@ -101,8 +101,8 @@
 - **防范中间人攻击 (TOFU)**：首次连接自动提取服务器 Host Key（SHA-256 指纹）并显示，支持 Ed25519/ECDSA/RSA 签名验证，并在本地及 API 持久化缓存已知主机指纹以防范二次连接的欺骗风险。
 - **全功能极客终端**：基于 `@xterm/xterm` 与 `@xterm/addon-webgl` 硬件加速渲染引擎，保证海量日志输出顺滑不卡顿。
 - **可靠的终端剪贴板交互**：鼠标完成终端选区后自动复制，右键可直接粘贴；触摸设备点击快捷键栏的复制按钮进入选择模式，拖动选择文本后再次点击完成复制，避免依赖不稳定的长按选区，粘贴则使用独立按钮。粘贴统一经过 xterm.js 原生输入管线，仅在远端应用启用 bracketed paste 模式时发送对应控制序列，并自动规范化换行，兼容 Vim 等交互式编辑器和普通 Shell。
-- **移动端终端适配**：针对手机和平板提供动态可视高度、软键盘与安全区适配、iOS 中文输入法兼容、紧凑工具栏、一次性 Ctrl/Alt、Esc/Tab/方向键/Home/End/PgUp/PgDn 等快捷键，以及移动端全屏 Agent/SFTP 面板。页面从后台返回后会主动验证 WebSocket，淘汰表面在线但已失效的连接；匿名会话使用当前内存凭据重新建立 SSH，登录用户的已保存服务器则重新申请一次性连接令牌，且只有收到 `shell_ready` 后才恢复“已连接”状态和终端输入。用户可主动尝试“全屏横屏”；浏览器不支持方向锁定时会回退为手动旋转提示，不会强制改变桌面端布局。移动系统若彻底回收网页，当前 Shell 仍无法无缝续接。
-- **个性化 UI 与液态分段切换器**：Theme V4 系统提供 Standard Dark、Standard Light、Cyberpunk 以及参考 macOS 26 液态玻璃质感打造的 Liquid Glass 四款内置主题。用户空间顶栏与终端操作区升级为悬浮玻璃灵动岛与液态分段切换器（Liquid Segmented Controls），将 SFTP、自定义命令与 AI Agent 抽屉整合为单极药丸胶囊，配备双边异步物理弹簧引擎驱动的 3D 液态透镜滑块，提供丝滑的互斥展开与收起体验。V4 支持渐变/网格背景层（含读性遮罩与缓慢漂移动画）、扫描线/闪烁/辉光/噪点效果注册表、独立表面模糊与提饱和档位（`saturate(180%)` + 镜面内发光）与版式缩放，主体风格间差异显著。配套 [GitHub Pages 主题编辑器](https://newbietan.github.io/CloudSSH/theme-editor/)可实时调整颜色、形状、密度、字体、阴影、动效、背景层、效果及按钮/输入框/卡片/标签页样式，并预览登录页、服务器列表、终端 + SFTP 和 AI Agent 面板。分段条默认常驻 5 项（4 款内置 + 1 款自定义 Custom），移除了独立的上传按钮。用户点击 Custom 时若未上传过主题将自动弹出管理模态框引导上传，已激活状态下再次点击 Custom 可打开管理弹窗进行多套主题管理（支持色块预览、切换生效、删除确认，最多保存 20 套自定义主题）。登录用户自动通过云端跨设备同步多主题库，匿名用户本地保存在当前浏览器。
+- **移动端终端适配**：针对手机和平板提供动态可视高度、软键盘与安全区适配（刘海屏/灵动岛 `env(safe-area-inset-*)` 动态计算）、iOS 中文输入法兼容、紧凑工具栏、一次性 Ctrl/Alt、Esc/Tab/方向键/Home/End/PgUp/PgDn 等快捷键，以及移动端全屏 Agent/SFTP 面板。三大抽屉面板（SFTP、Agent、命令片段）支持头部触摸右滑手势关闭，避开 iOS 屏幕边缘系统手势且与列表纵向滚动无竞争；触屏优化按压缩放反馈、全局关闭原生点击灰闪，粗指针下自动将文件行高增至约 36px 提升触控精度，并为可滚动抽屉容器添加 `overscroll-behavior-y: contain` 阻断橡皮筋滚动穿透。窄屏下 AI Agent 头部与快捷提示词自适应折叠换行，完整呈现标题与提示词方块。页面从后台返回后会主动验证 WebSocket，淘汰表面在线但已失效的连接；匿名会话使用当前内存凭据重新建立 SSH，登录用户的已保存服务器则重新申请一次性连接令牌，且只有收到 `shell_ready` 后才恢复“已连接”状态和终端输入。用户可主动尝试“全屏横屏”；浏览器不支持方向锁定时会回退为手动旋转提示，不会强制改变桌面端布局。移动系统若彻底回收网页，当前 Shell 仍无法无缝续接。
+- **个性化 UI 与液态分段切换器**：Theme V4 系统提供 Standard Dark、Standard Light、Cyberpunk 以及参考 macOS 26 液态玻璃质感打造的 Liquid Glass 四款内置主题。用户空间顶栏与终端操作区升级为悬浮玻璃灵动岛与液态分段切换器（Liquid Segmented Controls），将 SFTP、自定义命令与 AI Agent 抽屉整合为单极药丸胶囊，配备共享一维物理弹簧引擎（`spring.ts`，基于 Euler 数值积分）驱动的 3D 液态透镜滑块，提供丝滑的互斥展开与收起体验。指针聚光灯（Specular Spotlight）泛化至全主题（rAF 节流传导 CSS 变量，触屏设备自动跳过以省电），新增服务器卡片与 SFTP 列表交错入场动效、冷加载骨架屏（含完整 ARIA 无障碍标记）、全局键盘 `:focus-visible` 主题色焦点环，并修复多层阴影组合语法规范。V4 支持渐变/网格背景层（含读性遮罩与缓慢漂移动画）、扫描线/闪烁/辉光/噪点效果注册表、独立表面模糊与提饱和档位（`saturate(180%)` + 镜面内发光）与版式缩放，全量动效支持 `prefers-reduced-motion` 与 `data-ui-motion` 降级，主体风格间差异显著。配套 [GitHub Pages 主题编辑器](https://newbietan.github.io/CloudSSH/theme-editor/)可实时调整颜色、形状、密度、字体、阴影、动效、背景层、效果及按钮/输入框/卡片/标签页样式，并预览登录页、服务器列表、终端 + SFTP 和 AI Agent 面板。分段条默认常驻 5 项（4 款内置 + 1 款自定义 Custom），移除了独立的上传按钮。用户点击 Custom 时若未上传过主题将自动弹出管理模态框引导上传，已激活状态下再次点击 Custom 可打开管理弹窗进行多套主题管理（支持色块预览、切换生效、删除确认，最多保存 20 套自定义主题）。登录用户自动通过云端跨设备同步多主题库，匿名用户本地保存在当前浏览器。
 - **SFTP 图形化文件管理**：集成完整的 SFTP v3 文件传输协议，提供图形化文件浏览器界面。工具栏支持路径面包屑分级导航（点击直达父级目录，点击空白切换绝对路径文本输入），列表支持按文件名、大小、修改时间双向排序（目录严格优先置顶）。支持一键新建空白文件并自动唤起 CodeMirror 在线编辑。支持目录浏览、文件上传/下载、新建文件夹、文件重命名与删除等操作；支持普通单选、`Cmd/Ctrl` 切换选择、`Shift` 连选、全选，以及批量下载文件和批量删除。双击文件智能处理（文本文件直接在线编辑，二进制/超大文件自动转串行下载）。内置 CodeMirror 在线编辑器，可直接编辑远端小文本文件（≤2MB，UTF-8 可编辑，GBK/GB18030 自动识别为只读），保留原文件换行符与 BOM，保存前自动检测远端修改并提示冲突确认，支持编辑器页脚自动换行动态切换与偏好持久化，常见配置（shell/YAML/JSON/Python/Markdown/HTML/CSS/Dockerfile/systemd 等）带语法高亮。基于 SSH 子系统实现，与终端会话并行运行，互不干扰，支持下载队列及上传取消。
 - **原生文件传输**：集成 [trzsz.js](https://github.com/trzsz/trzsz.js)，支持 `trz`（上传）/ `tsz`（下载）命令进行文件传输，兼容 tmux 会话。还支持拖拽文件到终端窗口直接上传、目录传输及断点续传等高级功能。（需远程服务器安装 [trzsz](https://trzsz.github.io/)）
 - **多语言界面**：内置简体中文、繁體中文与英文三套 UI 词条，自动跟随浏览器语言并提供手动切换，选择通过 URL 参数或本地存储（`cloudssh_locale`）持久化。
@@ -228,9 +228,14 @@ Fork 仓库可以通过内置的 `Sync upstream` GitHub Actions 工作流，定�
 > **配置建议与补充说明**：
 >
 > 1. **Secret 安全存储**：在 Cloudflare Dashboard 的 _Settings → Variables and Secrets_ 中，强烈建议将所有包含密码、Secret、Key 等敏感凭据的变量统一选择为 **Secret** 类型。Secrets 存储在 Cloudflare 独立加密存储层中，重新构建和部署 Worker 时不会被代码覆盖。
-> 2. **预留变量说明**：代码中保留了 `MAX_CONNECTIONS` 环境变量接口定义，当前版本暂未读取生效，请勿依赖。
+> 2. **凭据存储边界**：已保存的 SSH 凭据、AI API key、隧道 Service Token 与敏感服务器记忆使用 AES-GCM 存储，但加密根密钥位于同一 UserDBDO SQLite 的 `system_config.encryption_secret`。这仅避免凭据列直接存明文，不抵御含密钥的整库泄露、数据库读权限或 Worker 代码执行权限失陷；并非独立 Secret/KMS 保护。
+> 3. **预留变量说明**：代码中保留了 `MAX_CONNECTIONS` 环境变量接口定义，当前版本暂未读取生效，请勿依赖。
 >
-> 3. **wrangler 部署的变量权威性**：经 Git 集成/CLI（wrangler）部署的实例以 `wrangler.toml` 为配置权威——Dashboard 中的同名普通变量会在部署时被覆盖，**Secret 类型不受影响**。`IDLE_TIMEOUT` / `REQUIRE_GITHUB_AUTH` / `ENABLE_SSH_SHARING` / `STRICT_HOST_KEY_VERIFY` 已随 `[vars]` 默认下发，如需自定义请直接修改 `wrangler.toml`；`TURNSTILE` 与 `ADMIN_PASSWORD_HASH` 等按需变量建议在 Dashboard 中以 Secret 类型维护。
+> 4. **终端输出积压保护**：stdout 与 stderr 共享 4MiB 未接收确认额度；超限或有积压且 60s 无有效客户端确认进展时正常关闭会话，禁止自动重连。它不是累计输出上限，也不限制畅通链路持续输出的费用；确认仅代表 WebSocket 已接收，不代表终端渲染或文件落盘完成。升级后请刷新已有页面，旧前端不发送确认也会触发保护。Agent 命令确认也要求回传新的一次性确认 ID，旧页面无法批准；等待确认期间仍受 `IDLE_TIMEOUT` 约束（`0` 明确禁用）。
+>
+> 5. **SFTP 目录删除预算**：每目录最多 10,000 条及 8MiB 条目估算内存；整棵树共享 50,000 条、16MiB 累计条目估算内存、100,000 次请求、深度 64 与 5 分钟预算。截断或预算耗尽会明确失败，不对截断目录继续部分删除；此前已完成的删除不会回滚。连续空目录批次和异常报文也会失败收敛，句柄清理最多额外尝试 5 秒。
+>
+> 6. **wrangler 部署的变量权威性**：经 Git 集成/CLI（wrangler）部署的实例以 `wrangler.toml` 为配置权威——Dashboard 中的同名普通变量会在部署时被覆盖，**Secret 类型不受影响**。`IDLE_TIMEOUT` / `REQUIRE_GITHUB_AUTH` / `ENABLE_SSH_SHARING` / `STRICT_HOST_KEY_VERIFY` 已随 `[vars]` 默认下发，如需自定义请直接修改 `wrangler.toml`；`TURNSTILE` 与 `ADMIN_PASSWORD_HASH` 等按需变量建议在 Dashboard 中以 Secret 类型维护。
 
 #### 可选：启用单管理员密码登录（替代 GitHub OAuth）
 
@@ -274,10 +279,10 @@ Fork 仓库可以通过内置的 `Sync upstream` GitHub Actions 工作流，定�
    - `BASE_URL` = `https://your-domain.com`（你的部署域名）
    - `GITHUB_CLIENT_SECRET` = 你的 Client Secret
 
-   还可以按部署用途添加以下两个独立的可选配置：
+   还可以按部署用途设置以下三个独立的可选配置：
    - `GITHUB_ALLOWED_USER_IDS`：允许登录的 GitHub **数字用户 ID**，多个 ID 使用英文逗号分隔，例如 `83105156,6236783`。未配置时不限制 GitHub 账号；配置为空或包含非正整数时采用 fail-closed，拒绝所有 GitHub 登录。
    - `REQUIRE_GITHUB_AUTH`：设置为 `true` 时禁用匿名 SSH，所有 SSH WebSocket 都必须带有有效 GitHub session；未配置或设置为 `false` 时保留匿名连接。
-   - `ENABLE_SSH_SHARING`：设置为 `true` 时允许登录用户为已保存服务器创建一次性分享链接；默认关闭。启用即表示管理员明确允许持有分享凭证的接收者在不登录 GitHub 的情况下建立受审计 SSH 会话。
+   - `ENABLE_SSH_SHARING`：设置为 `true` 时允许登录用户为已保存服务器创建一次性分享链接。Git 集成/CLI 部署的 `wrangler.toml` 在生产与 test 环境均默认下发 `true`；关闭请改为 `false`。运行时变量未配置时关闭（如未自行配置变量的 Dashboard 手动上传部署）。启用表示允许持有分享凭证的接收者无需登录即可建立受审计 SSH 会话。
 
    **获取 GitHub 数字用户 ID**：
    - 浏览器访问 `https://api.github.com/users/octocat`（将 `octocat` 替换为实际用户名），在返回的 JSON 中读取 `id` 字段。例如响应中的 `"id": 583231` 表示数字用户 ID 为 `583231`。

@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test';
-import { mockAnonymousSession } from './helpers';
+import { expect, test } from './fixtures';
+import { blockOptionalThirdPartyAssets, mockAnonymousSession } from './helpers';
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });
 
@@ -403,6 +403,7 @@ test('移动端保留 SFTP 与 AI Agent 抽屉入口，分段条为桌面专属'
 });
 
 test('登录后移动端 AI Agent 入口与桌面按钮同步解锁', async ({ page }) => {
+  await blockOptionalThirdPartyAssets(page);
   await page.route('**/api/auth/me', (route) =>
     route.fulfill({
       status: 200,

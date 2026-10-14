@@ -43,7 +43,7 @@ export class ToolExecutor {
   constructor(
     private terminalContext: TerminalContext,
     private execCommand: ExecCommandFn,
-    private askConfirmation: (command: string, reason: string) => Promise<boolean>,
+    private askConfirmation: (command: string, reason: string, signal?: AbortSignal) => Promise<boolean>,
     private resetTimeout?: () => void
   ) {}
 
@@ -101,6 +101,7 @@ export class ToolExecutor {
     if (confirm.required) {
       const approved = await this.askConfirmationWithAbort(command, confirm.reason!, signal);
       if (!approved) {
+        if (signal?.aborted) return JSON.stringify({ status: 'cancelled', executed: false });
         return JSON.stringify({
           stdout: '',
           stderr: '用户拒绝执行此命令',
@@ -110,6 +111,7 @@ export class ToolExecutor {
       }
     }
 
+    if (signal?.aborted) return JSON.stringify({ status: 'cancelled', executed: false });
     const clampedTimeout = Math.min(Math.max(timeout, 1000), 180000);
 
     // 对于长时间命令（>60秒），定期重置看门狗计时器
@@ -319,6 +321,7 @@ export class ToolExecutor {
     signal?: AbortSignal
   ): Promise<string> {
     const approved = await this.askConfirmationWithAbort(command, reason, signal);
+    if (signal?.aborted) return JSON.stringify({ status: 'cancelled', executed: false });
     return approved
       ? 'User approved'
       : 'User rejected the command. Do not retry without user approval.';
@@ -334,12 +337,23 @@ export class ToolExecutor {
     signal?: AbortSignal
   ): Promise<boolean> {
     if (signal?.aborted) return Promise.resolve(false);
-    return Promise.race([
-      this.askConfirmation(command, reason),
-      new Promise<boolean>((resolve) => {
-        signal?.addEventListener('abort', () => resolve(false), { once: true });
-      }),
-    ]);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (approved: boolean) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        resolve(approved);
+      };
+      const abort = () => settle(false);
+      signal?.addEventListener('abort', abort, { once: true });
+      // Pass cancellation through to the owner of the pending confirmation slot.
+      // Remove our listener on BOTH approval and cancellation, not just abort.
+      Promise.resolve().then(() => {
+        if (signal?.aborted) return false;
+        return this.askConfirmation(command, reason, signal);
+      }).then(settle, () => settle(false));
+    });
   }
 
   private async handleDetectEnvironment(signal?: AbortSignal): Promise<string> {

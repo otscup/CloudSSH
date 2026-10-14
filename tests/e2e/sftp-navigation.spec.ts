@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 function makeEntry(name: string, size: number, mtime: number, isDir = false): Record<string, unknown> {

@@ -1,4 +1,4 @@
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Page, test } from './fixtures';
 import { blockOptionalThirdPartyAssets } from './helpers';
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true });

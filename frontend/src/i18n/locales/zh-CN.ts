@@ -334,6 +334,7 @@ export const zhCN = {
   'terminal.status.sessionIdleWarning':
     '会话长时间无操作，即将自动断开以节省资源（敲击任意键继续）',
   'terminal.status.inputBacklogClosed': '终端输入积压过多，连接已关闭',
+  'terminal.status.outputBacklogClosed': '终端输出积压或客户端确认超时，连接已关闭',
   'terminal.status.packetError': '数据包处理异常：{message}',
   'terminal.status.algorithmError': '算法协商失败：{message}',
   'terminal.status.serviceError': 'SSH 服务请求失败：{message}',
@@ -413,6 +414,7 @@ export const zhCN = {
   'sftp.modified': '修改时间',
   'sftp.actions': '操作',
   'sftp.empty': '此目录为空',
+  'sftp.emptyHint': '拖拽文件到此面板即可上传',
   'sftp.connecting': '正在连接 SFTP…',
   'sftp.reconnecting': '正在重新连接 SFTP…',
   'sftp.waitingWebSocket': '正在等待 SFTP 连接地址…',

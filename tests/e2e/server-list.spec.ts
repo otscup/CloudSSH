@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { blockOptionalThirdPartyAssets } from './helpers';
 
 const servers = Array.from({ length: 30 }, (_, index) => ({

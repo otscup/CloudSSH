@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { nextSequenceNumber, SSHPacketBuilder, SSHPacketParser } from '../../src/ssh/packet';
 import { readUint32 } from '../../src/ssh/utils';
-import type { SSHPacket } from '../../src/types';
 
 // =====================================================================
 // packet.test.ts
@@ -577,15 +576,16 @@ describe('packet — GCM 模式完整往返', () => {
     expect(pkt).toBeNull();
   });
 
-  it('GCM 模式 decrypt 返回 null 时 nextPacket 返回 null', async () => {
+  it('GCM 模式解密失败必须抛错，不能伪装为数据未收齐', async () => {
     const payload = randomPayload(20);
     const blockSize = 16;
     const wire = await SSHPacketBuilder.build(payload, blockSize, fakeGcmEncrypt, 0, true);
     const parser = new SSHPacketParser();
     parser.feed(wire);
     // decrypt 返回 null 模拟解密失败
-    const pkt = await parser.nextPacket(blockSize, () => null, true, 0);
-    expect(pkt).toBeNull();
+    await expect(parser.nextPacket(blockSize, () => null, true, 0))
+      .rejects.toThrow('decryption/authentication failed');
+    expect(parser.getSeqNum()).toBe(0);
   });
 
   it('GCM 模式 MAC 字段（raw.subarray(4+packetLength)）应为 16 字节 tag', async () => {
@@ -616,7 +616,7 @@ describe('packet — CTR 模式 MAC 校验', () => {
     async function mockEnc(data: Uint8Array): Promise<Uint8Array> {
       return data;
     }
-    async function mockMac(data: Uint8Array): Promise<Uint8Array> {
+    async function mockMac(_data: Uint8Array): Promise<Uint8Array> {
       const r = new Uint8Array(macLen);
       r.set(fakeMac.subarray(0, Math.min(fakeMac.length, macLen)));
       return r;
@@ -687,14 +687,25 @@ describe('packet — CTR 模式 MAC 校验', () => {
     expect(pkt!.mac!.length).toBe(macLen);
   });
 
-  it('CTR decrypt 返回 null 时 nextPacket 返回 null（first block 解密失败）', async () => {
+  it('CTR 首块解密失败必须抛错', async () => {
     const payload = randomPayload(20);
     const blockSize = 16;
     const built = await SSHPacketBuilder.build(payload, blockSize, null, 0);
     const parser = new SSHPacketParser();
     parser.feed(built);
-    const pkt = await parser.nextPacket(blockSize, () => null, false, 0);
-    expect(pkt).toBeNull();
+    await expect(parser.nextPacket(blockSize, () => null, false, 0))
+      .rejects.toThrow('header decryption failed');
+  });
+
+  it('CTR 整包解密失败必须抛错', async () => {
+    const parser = new SSHPacketParser();
+    const wire = await SSHPacketBuilder.build(randomPayload(20), 16, null, 0);
+    parser.feed(wire);
+    await expect(parser.nextPacket(16, (data, _seq, _aad, commit) => commit ? null : data))
+      .rejects.toThrow('packet decryption failed');
+    expect(parser.getSeqNum()).toBe(0);
+    parser.clear();
+    expect(parser.getBufferLength()).toBe(0);
   });
 
   it('CTR 数据不够 first block 时返回 null（不调用 decrypt）', async () => {

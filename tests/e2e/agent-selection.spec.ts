@@ -1,5 +1,5 @@
 import AxeBuilder from '@axe-core/playwright';
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 test('terminal selection is attached for review and sent only with a user question', async ({

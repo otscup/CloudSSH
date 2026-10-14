@@ -57,8 +57,8 @@ pnpm run test:coverage
 # 监听模式
 pnpm test --watch
 
-# 安装并运行 Chromium E2E 与 axe 无障碍检查
-pnpm exec playwright install chromium
+# 安装并运行 Chromium / WebKit E2E 与 axe 无障碍检查
+pnpm exec playwright install chromium webkit
 pnpm run test:e2e
 
 # 类型检查、测试、可复现构建和 E2E 完整门禁
@@ -70,6 +70,15 @@ pnpm run verify
 > workers-types 环境）与 `tsc -p tests/tsconfig.frontend.json`（tests 根目录 *.test.ts + e2e，
 > DOM 环境）。两个测试配置分开的原因：`@cloudflare/workers-types` 声明的基础 DOM 接口
 > （如 Element.append）与 DOM lib 合并冲突，不能在同一项目里同时加载。
+
+## E2E 网络隔离约定
+
+- 所有 `tests/e2e/*.spec.ts` 必须从 `./fixtures` 导入 `test` / `expect`，不得直接使用原始 Playwright `test`。`tests/e2e-fixtures.test.ts` 会扫描新旧 spec，防止漏接自动守卫。
+- 自动 fixture 在每个浏览器 context 上安装基础 GET Mock：`/api/config`、`/api/auth/me`（默认匿名）、`/api/user/theme`（空主题库）和 `/api/user/mobile-shortcuts`。不再依赖手动调用 helper；popup/同 context 新页面同样受保护，Service Worker 禁用以免绕过路由。
+- 业务接口与所有 PUT/POST/DELETE 必须在触发交互前显式 Mock，并核对请求方法、路径/参数、载荷和结果。页面级 `page.route()` 优先于 context 默认值；不处理的方法应 `route.fallback()`，不能统一返回成功。
+- 未声明的 API 会被中止并记录。即使应用 `catch` 后继续运行，fixture 清理阶段仍令测试失败，报告中附 `unmocked-api-requests`，只记录方法和路径，不记录查询值/正文/凭据。手工创建独立 context 时应调用 `installApiMocks()` 并在关闭后检查其守卫。
+- Playwright 始终启动全新 `--mode e2e --strictPort` Vite，不复用普通开发服务器；4173 被占用时明确失败，不漂移端口。E2E 不运行 8787 后端；漏到服务器的 `/api` 请求返回带标记的 **501 JSON**，而不是 SPA 的 **200 HTML**，页面 `route.continue()` 的绕过也会被守卫识别。普通开发仍保留 Worker 代理。
+- E2E 验证不能只查控制台是否有 `ECONNREFUSED`：须确认测试退出码、守卫检查和完整 stdout/stderr。比较耗时时保持机器、浏览器项目、worker 数和重试设置一致。
 
 ## 当前覆盖范围
 
@@ -111,6 +120,8 @@ pnpm run verify
 
 ### 浏览器 E2E
 
+- API 隔离守卫（`api-isolation.spec.ts`，Chromium + WebKit）：自动基础 JSON Mock、同 context 多页面、用例覆盖、未知 API/未声明写操作失败、查询值脱敏、`route.continue()` 绕过时的 501 JSON 与守卫失败。
+- 主题云端同步（`theme-sync.spec.ts` / `theme-styles.spec.ts`）：GET 多主题库与 activeId 恢复、PUT 载荷和云端状态、带 id 的 DELETE 与本地回退；GET 503/网络错误保留本地选择、PUT/DELETE 失败返回 false，不将本地成功等同于云端成功。
 - 匿名连接表单 axe 检查
 - 服务器弹窗的基本对话框语义、初始焦点和 Escape 关闭
 - 服务器标签筛选、分页与配置快速克隆
@@ -129,7 +140,7 @@ pnpm run verify
 
 ## 当前限制
 
-- Playwright 的完整界面与无障碍回归主要运行 Chromium；认证挑战、iOS 输入法、移动端后台连接恢复、SFTP 面板操作、终端触摸滚轮和焦点报告另在 WebKit 设备项目中执行。Firefox 尚未纳入当前质量门禁。
+- Playwright 的完整界面与无障碍回归主要运行 Chromium；API 隔离守卫、认证挑战、iOS 输入法、移动端后台连接恢复、SFTP 面板操作、终端触摸滚轮和焦点报告另在 WebKit 设备项目中执行。Firefox 尚未纳入当前质量门禁。
 - 浏览器 E2E 主要通过 mock API 验证前端行为，尚未连接真实 OpenSSH/Dropbear 和 SFTP 服务。
 - SSHSessionDO、SSH 会话状态机、SFTP 数据流和 AgentCore 等运行态模块的覆盖率仍偏低。
 - 新增协议状态、WebSocket 消息或安全边界时，应优先补充运行时错误、取消、超时和畸形输入测试，而不仅验证成功路径。

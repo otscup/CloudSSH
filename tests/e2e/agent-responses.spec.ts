@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 async function mount(page: import('@playwright/test').Page, locale = 'zh-CN') {
@@ -72,6 +72,93 @@ for (const [locale, expected] of [['zh-CN', '模型响应未完成'], ['zh-TW', 
     await expect(page.locator('#agent-send-btn')).not.toHaveClass(/is-stopping/);
   });
 }
+
+test('confirmation buttons and closure frames bind to one ID, even for identical commands', async ({ page }) => {
+  await mount(page);
+  await page.evaluate(() => {
+    document.getElementById('terminal-section')!.classList.remove('hidden');
+    const { panel } = (window as any).__responsesAgent;
+    panel.handleAgentFrame({ subType: 'confirm_required', confirmationId: 'AAAAAAAAAAAAAAAA',
+      command: 'rm file', reason: 'delete' });
+    (window as any).__oldConfirmButton = document.querySelector('.agent-confirm-yes');
+  });
+  await page.locator('.agent-confirm-yes').click();
+  await page.evaluate(() => {
+    const { panel } = (window as any).__responsesAgent;
+    panel.handleAgentFrame({ subType: 'confirm_required', confirmationId: 'BBBBBBBBBBBBBBBB',
+      command: 'rm file', reason: 'delete' });
+    (window as any).__oldConfirmButton.click();
+    panel.handleAgentFrame({ subType: 'confirm_closed', confirmationId: 'AAAAAAAAAAAAAAAA' });
+  });
+  await expect(page.locator('.agent-confirm')).toHaveCount(1);
+  await page.locator('.agent-confirm-yes').click();
+  const replies = await page.evaluate(() => (window as any).__responsesAgent.sent
+    .filter((frame: any) => frame.type === 'agent_confirm'));
+  expect(replies).toEqual([
+    { type: 'agent_confirm', confirmationId: 'AAAAAAAAAAAAAAAA', approved: true, command: 'rm file' },
+    { type: 'agent_confirm', confirmationId: 'BBBBBBBBBBBBBBBB', approved: true, command: 'rm file' },
+  ]);
+});
+
+test('a queued old auto-confirm callback cannot approve or cancel the new timer', async ({ page }) => {
+  await page.clock.install();
+  await mount(page);
+  await page.evaluate(() => {
+    document.getElementById('terminal-section')!.classList.remove('hidden');
+    const { panel } = (window as any).__responsesAgent;
+    panel.agentMode = 'auto';
+    const original = window.setTimeout;
+    let oldTimer: (() => void) | undefined;
+    window.setTimeout = ((fn: any, delay: number, ...args: any[]) => {
+      if (delay === 3000 && !oldTimer) oldTimer = fn;
+      return original(fn, delay, ...args);
+    }) as typeof window.setTimeout;
+    const frame = { subType: 'confirm_required', command: 'rm file', reason: 'delete' };
+    panel.handleAgentFrame({ ...frame, confirmationId: 'AAAAAAAAAAAAAAAA' });
+    panel.handleAgentFrame({ ...frame, confirmationId: 'BBBBBBBBBBBBBBBB' });
+    oldTimer!();
+    window.setTimeout = original;
+    if (panel.autoConfirmTimer === null) throw new Error('Old callback cancelled current timer');
+  });
+  await page.clock.runFor(3000);
+  const approvals = await page.evaluate(() => (window as any).__responsesAgent.sent
+    .filter((frame: any) => frame.type === 'agent_confirm' && frame.approved));
+  expect(approvals).toEqual([
+    { type: 'agent_confirm', confirmationId: 'BBBBBBBBBBBBBBBB', approved: true, command: 'rm file' },
+  ]);
+  await expect(page.locator('.agent-confirm')).toHaveCount(0);
+});
+
+test('missing Markdown wrapper falls back to text, never raw response HTML', async ({ page }) => {
+  await mount(page);
+  const attack = '<img src=x onerror="window.__agentXss=1"><svg onload="window.__agentXss=1">';
+  await page.evaluate(content => {
+    const { panel } = (window as any).__responsesAgent;
+    (window as any).__agentXss = 0;
+    panel.handleAgentFrame({ subType: 'stream_chunk', content: 'streaming' });
+    panel.renderMarkdown = () => '<p>sanitized fragment without wrapper</p>';
+    panel.handleAgentFrame({ subType: 'stream_end', content });
+  }, attack);
+  const rendered = page.locator('.agent-response .agent-md-content');
+  await expect(rendered).toHaveText(attack);
+  await expect(rendered.locator('img, svg, script')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__agentXss)).toBe(0);
+});
+
+test('normal Markdown still renders through DOMPurify without event attributes', async ({ page }) => {
+  await mount(page);
+  await page.evaluate(() => {
+    const { panel } = (window as any).__responsesAgent;
+    (window as any).__agentXss = 0;
+    panel.handleAgentFrame({ subType: 'stream_chunk', content: 'streaming' });
+    panel.handleAgentFrame({ subType: 'stream_end', content:
+      '**safe bold** <img src=x onerror="window.__agentXss=1"><script>window.__agentXss=1</script>' });
+  });
+  const rendered = page.locator('.agent-response .agent-md-content');
+  await expect(rendered.locator('strong')).toHaveText('safe bold');
+  await expect(rendered.locator('[onerror], script')).toHaveCount(0);
+  expect(await page.evaluate(() => (window as any).__agentXss)).toBe(0);
+});
 
 test('AI settings disclose retention and reject legacy generation addresses locally', async ({ page }) => {
   await mockAnonymousSession(page);

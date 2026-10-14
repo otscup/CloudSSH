@@ -889,11 +889,14 @@ async function restoreCloudTheme(
 // ==================== 初始化 ====================
 
 /**
- * macOS 26 液态玻璃动态指针天光追踪：
- * 仅在 liquid 风格下监听 pointermove 并通过 requestAnimationFrame 节流更新 --mx 和 --my，
+ * 卡片指针聚光追踪（全主题通用）：
+ * 监听 pointermove 并通过 requestAnimationFrame 节流更新 --mx 和 --my，
  * 纯变量传导，零 DOM 重排，GPU 仅更新 radial-gradient 聚光位置。
+ * 触屏设备无悬停语义（CSS 侧同步隐藏聚光层），直接不注册以省电。
  */
 function initPointerSpecularTracking(): void {
+  if (window.matchMedia?.('(hover: none) and (pointer: coarse)').matches) return;
+
   let rafId: number | null = null;
   let targetCard: HTMLElement | null = null;
   let px = 50;
@@ -902,9 +905,8 @@ function initPointerSpecularTracking(): void {
   document.addEventListener(
     'pointermove',
     (e: PointerEvent) => {
-      if (document.documentElement.dataset.uiStyle !== 'liquid') return;
       const card = (e.target as HTMLElement | null)?.closest?.(
-        '.server-card, .cyber-box'
+        '.server-card, .cyber-box, .sftp-entry'
       ) as HTMLElement | null;
       if (!card) {
         targetCard = null;

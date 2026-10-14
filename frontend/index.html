@@ -33,6 +33,7 @@
       >
         <div class="scanlines"></div>
         <div class="flicker"></div>
+        <div class="auth-aurora" aria-hidden="true"></div>
         <main class="w-full max-w-md relative z-10">
           <button
             id="back-to-terminal-from-auth-btn"
@@ -367,12 +368,14 @@
               id="server-search-empty"
               class="hidden flex-col items-center justify-center py-16"
             >
-              <span
-                class="material-symbols-outlined text-dim mb-3"
-                style="font-size: 48px"
-                aria-hidden="true"
-                >search_off</span
-              >
+              <div class="empty-state-badge" aria-hidden="true">
+                <span
+                  class="material-symbols-outlined"
+                  style="font-size: 34px"
+                  aria-hidden="true"
+                  >search_off</span
+                >
+              </div>
               <p
                 class="text-muted text-sm tracking-[0.08em] mb-2"
                 data-i18n="server.noMatches"
@@ -388,14 +391,16 @@
               id="empty-state"
               class="hidden flex-col items-center justify-center py-20"
             >
-              <span
-                class="material-symbols-outlined text-dim mb-4"
-                style="
-                  font-size: 64px;
-                  font-variation-settings: 'FILL' 0;
-                "
-                >dns</span
-              >
+              <div class="empty-state-badge" aria-hidden="true">
+                <span
+                  class="material-symbols-outlined"
+                  style="
+                    font-size: 36px;
+                    font-variation-settings: 'FILL' 0;
+                  "
+                  >dns</span
+                >
+              </div>
               <p
                 class="text-muted text-sm tracking-[0.1em] mb-2"
                 data-i18n="server.none"

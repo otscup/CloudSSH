@@ -334,6 +334,7 @@ export const zhTW = {
   'terminal.status.sessionIdleWarning':
     '會話長時間無操作，即將自動斷開以節省資源（敲擊任意鍵繼續）',
   'terminal.status.inputBacklogClosed': '終端輸入積壓過多，連線已關閉',
+  'terminal.status.outputBacklogClosed': '終端輸出積壓或客戶端確認逾時，連線已關閉',
   'terminal.status.packetError': '資料包處理異常：{message}',
   'terminal.status.algorithmError': '演算法協商失敗：{message}',
   'terminal.status.serviceError': 'SSH 服務請求失敗：{message}',
@@ -414,6 +415,7 @@ export const zhTW = {
   'sftp.modified': '修改時間',
   'sftp.actions': '操作',
   'sftp.empty': '此目錄為空',
+  'sftp.emptyHint': '拖曳檔案至此面板即可上傳',
   'sftp.connecting': '正在連線 SFTP…',
   'sftp.reconnecting': '正在重新連線 SFTP…',
   'sftp.waitingWebSocket': '正在等待 SFTP 連線位址…',

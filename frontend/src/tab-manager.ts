@@ -42,6 +42,14 @@ export class TabManager {
   /** 标签右键菜单的 document click 监听器（关闭菜单时统一移除，防止累积） */
   private tabCtxCloseHandler: ((e: MouseEvent) => void) | null = null;
 
+  /** 上次渲染的标签 id 集合与活跃 id：入场/激活动画只挂给"新出现"的标签，
+      避免 renderTabBar 全量重建导致状态刷新反复重放动画 */
+  private lastRenderedTabIds: Set<string> = new Set();
+  private lastRenderedActiveId: string | null = null;
+
+  /** 关闭动画进行期间抑制重排：动画结束后由 finish 回调统一补一次渲染 */
+  private renderSuppressed = false;
+
   /** 当所有标签都被关闭时触发，外部可以用它来回到连接页面 */
   private onAllTabsClosed?: () => void;
 
@@ -266,6 +274,23 @@ export class TabManager {
     const tab = this.tabs.get(tabId);
     if (!tab) return;
 
+    // 退出动画：挂类并抑制重排，动画结束（或兜底超时）后统一补一次渲染。
+    // 状态清理照旧同步执行，动画只是标签栏视觉层的延迟移除。
+    const tabEl = this.tabBarEl.querySelector(`[data-tab-id="${tabId}"]`);
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    if (tabEl && !reduceMotion) {
+      tabEl.classList.add('tab-item--exit');
+      this.renderSuppressed = true;
+      const finish = () => {
+        if (!this.renderSuppressed) return;
+        this.renderSuppressed = false;
+        this.renderTabBar();
+      };
+      tabEl.addEventListener('animationend', finish, { once: true });
+      // 兜底：motion=none 动画时长归零或动画被禁用时 animationend 可能不触发
+      setTimeout(finish, 260);
+    }
+
     // 清理资源
     if (tab.sftpPanel) {
       tab.sftpPanel.dispose();
@@ -407,13 +432,18 @@ export class TabManager {
   // ==================== 渲染标签栏 ====================
 
   renderTabBar(): void {
+    if (this.renderSuppressed) return;
     // 保留 new-tab-btn，清除其他标签按钮
     const newTabBtn = this.tabBarEl.querySelector('#new-tab-btn');
     this.tabBarEl.replaceChildren();
 
+    const renderedIds = new Set<string>();
     for (const tab of this.tabs.values()) {
+      renderedIds.add(tab.id);
       const tabEl = document.createElement('div');
-      tabEl.className = `tab-item${tab.id === this.activeTabId ? ' active' : ''}${tab.state === 'disconnected' ? ' disconnected' : ''}`;
+      const isNew = !this.lastRenderedTabIds.has(tab.id);
+      const isNewlyActive = tab.id === this.activeTabId && this.activeTabId !== this.lastRenderedActiveId;
+      tabEl.className = `tab-item${tab.id === this.activeTabId ? ' active' : ''}${tab.state === 'disconnected' ? ' disconnected' : ''}${isNew ? ' tab-item--enter' : ''}${isNewlyActive ? ' tab-item--activate' : ''}`;
       tabEl.dataset.tabId = tab.id;
 
       // 状态指示点
@@ -469,6 +499,9 @@ export class TabManager {
       btn.appendChild(this.createIcon('add', '16px'));
       this.tabBarEl.appendChild(btn);
     }
+
+    this.lastRenderedTabIds = renderedIds;
+    this.lastRenderedActiveId = this.activeTabId;
   }
 
   private tabDotClass(state: TabState): string {

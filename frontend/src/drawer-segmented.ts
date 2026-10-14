@@ -4,34 +4,7 @@
  * 配备双边异步物理弹簧（Asymmetric Dual-Edge Springs）驱动的液态透镜滑块。
  */
 
-class Spring {
-  public value: number;
-  public target: number;
-  public velocity: number = 0;
-  public stiffness: number;
-  public damping: number;
-  public mass: number;
-
-  constructor(value: number, stiffness = 170, damping = 20, mass = 1) {
-    this.value = value;
-    this.target = value;
-    this.stiffness = stiffness;
-    this.damping = damping;
-    this.mass = mass;
-  }
-
-  public update(dt: number): void {
-    const force = -this.stiffness * (this.value - this.target);
-    const damp = -this.damping * this.velocity;
-    const accel = (force + damp) / this.mass;
-    this.velocity += accel * dt;
-    this.value += this.velocity * dt;
-  }
-
-  public settled(eps = 0.1): boolean {
-    return Math.abs(this.value - this.target) < eps && Math.abs(this.velocity) < eps;
-  }
-}
+import { Spring } from './spring';
 
 export class LiquidSegmentedDrawerControl {
   private readonly container: HTMLElement;
@@ -146,12 +119,8 @@ export class LiquidSegmentedDrawerControl {
       (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
 
     if (!animate || reduceMotion || this.lastCenter === null) {
-      this.leftSpring.value = left;
-      this.leftSpring.target = left;
-      this.leftSpring.velocity = 0;
-      this.rightSpring.value = right;
-      this.rightSpring.target = right;
-      this.rightSpring.velocity = 0;
+      this.leftSpring.snapTo(left);
+      this.rightSpring.snapTo(right);
       this.renderPill(left, right);
       this.lens.style.opacity = '1';
       return;

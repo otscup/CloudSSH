@@ -336,41 +336,74 @@ export class SSHShareDO {
       return jsonError('Connection ticket has already been used', 409);
     }
 
-    const ownerStub = this.env.USER_DB.get(this.env.USER_DB.idFromName(active.owner_github_id));
-    const configResponse = await ownerStub.fetch(
-      new Request(`http://internal/internal/servers/${active.server_id}/share-config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id: active.owner_user_id,
-          share_id: active.share_id,
-          share_ref: active.token_hash,
-          session_expires_at: active.session_expires_at,
-        }),
-      })
-    );
-    if (!configResponse.ok) {
-      const error = await configResponse.text();
-      await this.appendAudit('session.connection_failed', { status: configResponse.status }, now);
-      await this.updateStatus(active, 'closed', now);
-      await this.syncOwnerMetadata(active, 'closed', { closedAt: now });
-      return new Response(error, {
-        status: configResponse.status,
-        headers: {
-          'Content-Type': configResponse.headers.get('Content-Type') || 'application/json',
-        },
-      });
+    let phase = 'config_fetch';
+    try {
+      const ownerStub = this.env.USER_DB.get(this.env.USER_DB.idFromName(active.owner_github_id));
+      const configResponse = await ownerStub.fetch(
+        new Request(`http://internal/internal/servers/${active.server_id}/share-config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: active.owner_user_id, share_id: active.share_id,
+            share_ref: active.token_hash, session_expires_at: active.session_expires_at,
+          }),
+        })
+      );
+      if (!configResponse.ok) {
+        await this.failConsumedConnection(active, { phase, status: configResponse.status });
+        // Do not reflect upstream bodies: they may contain credentials/diagnostics.
+        return jsonError('Share connection setup failed', configResponse.status);
+      }
+      phase = 'config_decode';
+      const config = await configResponse.json<SSHConnectionConfig>();
+      const policy = config?.sessionPolicy;
+      if (!policy || policy.source !== 'share' || policy.shareId !== active.share_id ||
+        policy.shareRef !== active.token_hash || policy.sessionExpiresAt !== active.session_expires_at ||
+        policy.allowAgent !== false || policy.allowMetadataMutation !== false ||
+        policy.allowHostKeyMutation !== false || policy.allowReconnect !== false ||
+        typeof config.host !== 'string' || !config.host || typeof config.username !== 'string' ||
+        !Number.isInteger(config.port) || config.port < 1 || config.port > 65535) {
+        throw new Error('Invalid share connection config');
+      }
+      phase = 'config_finalize';
+      const beforeFinalize = this.getShare();
+      if (!beforeFinalize || beforeFinalize.status !== 'active' ||
+        beforeFinalize.session_name !== body.sessionName) {
+        return jsonError('Share session is no longer active', 410);
+      }
+      await this.appendAudit('session.connecting', {}, now);
+      await this.syncOwnerMetadata(active, 'active', { activeAt: now });
+      await this.scheduleNextAlarm(active);
+      // A revocation/expiry can run while any cross-DO await above is pending.
+      const current = this.getShare();
+      if (!current || current.status !== 'active' || current.session_name !== body.sessionName) {
+        return jsonError('Share session is no longer active', 410);
+      }
+      if (Date.now() >= (current.session_expires_at ?? 0)) {
+        await this.revoke('expired');
+        return jsonError('Share session expired during connection setup', 410);
+      }
+      return Response.json({ config, serverName: active.server_name,
+        devicePubKey: active.device_pub_key ?? null });
+    } catch {
+      await this.failConsumedConnection(active, { phase });
+      return jsonError('Share connection setup failed; create a new share link', 502);
     }
+  }
 
-    const config = await configResponse.json<SSHConnectionConfig>();
-    await this.appendAudit('session.connecting', {}, now);
-    await this.syncOwnerMetadata(active, 'active', { activeAt: now });
-    await this.scheduleNextAlarm(active);
-    return Response.json({
-      config,
-      serverName: active.server_name,
-      devicePubKey: active.device_pub_key ?? null,
-    });
+  private async failConsumedConnection(
+    consumed: ShareStateRow, details: { phase: string; status?: number }
+  ): Promise<void> {
+    const current = this.getShare();
+    if (!current || current.status !== 'active' || current.session_name !== consumed.session_name) return;
+    const closedAt = Date.now();
+    // Persist terminal state FIRST. Audit/owner-notification failures must never
+    // leave a usable ticket or revert the capability to claimed/unused.
+    await this.updateStatus(current, 'closed', closedAt);
+    try { await this.appendAudit('session.connection_failed', details, closedAt); }
+    catch { console.error('Share connection failure audit unavailable'); }
+    try { await this.syncOwnerMetadata(current, 'closed', { closedAt }); }
+    catch { console.error('Share connection failure owner notification unavailable'); }
   }
 
   private async appendAuditEvent(body: Record<string, unknown>): Promise<Response> {

@@ -218,6 +218,7 @@ export class ServerList {
   private async init(): Promise<void> {
     this.renderUserInfo();
     this.bindEvents();
+    this.renderSkeletonGrid();
     await Promise.all([this.fetchSharingConfig(), this.fetchServers()]);
     this.renderServerGrid();
 
@@ -433,6 +434,7 @@ export class ServerList {
     const tagFilter = document.getElementById('server-tag-filter') as HTMLSelectElement | null;
     const pagination = document.getElementById('server-pagination');
     if (!grid || !emptyState || !searchWrapper || !searchEmptyState) return;
+    grid.removeAttribute('aria-busy');
 
     if (this.servers.length === 0) {
       grid.innerHTML = '';
@@ -491,7 +493,9 @@ export class ServerList {
     const visibleServers = page.items;
 
     // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
-    grid.innerHTML = visibleServers.map((server) => this.renderServerCard(server)).join('');
+    grid.innerHTML = visibleServers
+      .map((server, index) => this.renderServerCard(server, index, this.searchQuery === ''))
+      .join('');
 
     // 绑定卡片事件
     for (const server of visibleServers) {
@@ -546,6 +550,22 @@ export class ServerList {
     }
   }
 
+  /** 冷加载骨架屏：按当前分页尺寸渲染占位卡片，fetchServers 完成后由 renderServerGrid 整体替换 */
+  private renderSkeletonGrid(): void {
+    const grid = document.getElementById('server-grid');
+    if (!grid) return;
+    grid.setAttribute('aria-busy', 'true');
+    const skeletonCard = `<div class="skeleton-card" aria-hidden="true">
+      <div class="skeleton-line" style="width: 55%"></div>
+      <div class="skeleton-line" style="width: 80%"></div>
+      <div class="skeleton-line" style="width: 70%"></div>
+      <div class="skeleton-line" style="width: 75%"></div>
+      <div class="skeleton-line" style="width: 100%; height: 28px; margin-top: 8px"></div>
+    </div>`;
+    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+    grid.innerHTML = Array.from({ length: this.pageSize }, () => skeletonCard).join('');
+  }
+
   /** 渲染服务器名称前的图标：已识别操作系统 → 品牌 SVG，否则回退到默认 dns 图标 */
   private renderOSIconMarkup(os: string | null | undefined): string {
     const svg = osIconSvg(os);
@@ -556,7 +576,7 @@ export class ServerList {
     return `<span class="material-symbols-outlined text-primary shrink-0" style="font-size: 20px; font-variation-settings: 'FILL' 0;">dns</span>`;
   }
 
-  private renderServerCard(server: ServerConfig): string {
+  private renderServerCard(server: ServerConfig, index = 0, animate = false): string {
     const authIcon = server.auth_method === 'publickey' ? 'vpn_key' : 'password';
     const authLabel = server.auth_method === 'publickey' ? 'KEY' : 'PWD';
     const isTunnel = server.transport_type === 'cf_tunnel';
@@ -623,7 +643,7 @@ export class ServerList {
       : '';
 
     return `
-      <div class="server-card p-5 relative group" id="card-${server.id}">
+      <div class="server-card p-5 relative group${animate ? ' server-card--enter' : ''}" id="card-${server.id}"${animate ? ` style="--stagger-index: ${index}"` : ''}>
         <div class="absolute top-0 left-0 w-full h-[2px] bg-gradient-to-r from-transparent via-[var(--border-strong)] to-transparent group-hover:via-[var(--accent)] transition-all duration-300"></div>
 
         <div class="flex items-start justify-between gap-2 mb-3">

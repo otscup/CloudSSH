@@ -70,17 +70,17 @@ export class AgentCore {
     private sendToFrontend: (msg: any) => void,
     private fetchAIConfig: (userId: string) => Promise<AIConfig | null>,
     execCommand: (command: string, timeout: number, signal?: AbortSignal) => Promise<ExecResult>,
-    askConfirmation: (command: string, reason: string) => Promise<boolean>,
+    askConfirmation: (command: string, reason: string, signal?: AbortSignal) => Promise<boolean>,
     config?: Partial<AgentConfig>,
     private memoryProvider?: AgentMemoryProvider,
     private waitUntil?: (promise: Promise<unknown>) => void
   ) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.toolExecutor = new ToolExecutor(this.terminalContext, execCommand,
-      async (command, reason) => {
+      async (command, reason, signal) => {
         const controller = this.abortController;
         this.pauseTimeout();
-        try { return await askConfirmation(command, reason); }
+        try { return await askConfirmation(command, reason, signal); }
         finally { this.resetTimeout(controller); }
       }, () => this.resetTimeout(this.abortController));
     if (this.memoryProvider) {

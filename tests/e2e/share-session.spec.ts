@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { blockOptionalThirdPartyAssets } from './helpers';
 
 test('分享凭证立即离开地址栏，并且只在接收者明确确认后领取', async ({ page }) => {

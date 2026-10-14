@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 test('终端只在正常结束鼠标选区时自动复制', async ({ page }) => {

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 test('SFTP only overwrites an existing file after explicit confirmation', async ({ page }) => {

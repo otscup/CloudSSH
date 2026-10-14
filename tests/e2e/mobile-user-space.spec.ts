@@ -1,5 +1,5 @@
 /// <reference lib="es2022" />
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { blockOptionalThirdPartyAssets } from './helpers';
 
 const servers = Array.from({ length: 10 }, (_, index) => ({

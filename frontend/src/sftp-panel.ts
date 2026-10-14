@@ -18,6 +18,7 @@ import {
 } from './sftp-helpers';
 import { updateSelection } from './sftp-selection';
 import { Deferred, UploadWaiter } from './sftp-transfer';
+import { attachDrawerSwipeToClose } from './drawer-swipe';
 import {
   confirmDeleteItems,
   promptMkdirName,
@@ -117,6 +118,10 @@ export class SFTPPanel {
     this.getWebSocketUrl = getWebSocketUrl;
     this.container = this.createPanel();
     document.body.appendChild(this.container);
+    attachDrawerSwipeToClose(this.container, {
+      headerSelector: '.sftp-panel-header',
+      onClose: () => this.hide(),
+    });
 
     this.editorCoordinator = new SFTPEditorCoordinator({
       isSftpReady: () => this.sftpReady,
@@ -249,13 +254,39 @@ export class SFTPPanel {
         <!-- File List -->
         <div id="sftp-file-list" class="flex-1 overflow-y-auto custom-scrollbar">
           <!-- Loading -->
-          <div id="sftp-loading" class="hidden flex items-center justify-center py-12">
-            <div class="animate-spin rounded-full h-6 w-6 border-2 border-primary-container border-t-transparent"></div>
+          <div id="sftp-loading" class="hidden flex-col gap-2 px-3 py-3" aria-hidden="true">
+            <div class="flex items-center gap-2 py-0.5">
+              <div class="skeleton-line shrink-0" style="width: 16px; height: 16px"></div>
+              <div class="skeleton-line" style="width: 55%"></div>
+            </div>
+            <div class="flex items-center gap-2 py-0.5">
+              <div class="skeleton-line shrink-0" style="width: 16px; height: 16px"></div>
+              <div class="skeleton-line" style="width: 72%"></div>
+            </div>
+            <div class="flex items-center gap-2 py-0.5">
+              <div class="skeleton-line shrink-0" style="width: 16px; height: 16px"></div>
+              <div class="skeleton-line" style="width: 44%"></div>
+            </div>
+            <div class="flex items-center gap-2 py-0.5">
+              <div class="skeleton-line shrink-0" style="width: 16px; height: 16px"></div>
+              <div class="skeleton-line" style="width: 63%"></div>
+            </div>
+            <div class="flex items-center gap-2 py-0.5">
+              <div class="skeleton-line shrink-0" style="width: 16px; height: 16px"></div>
+              <div class="skeleton-line" style="width: 38%"></div>
+            </div>
+            <div class="flex items-center gap-2 py-0.5">
+              <div class="skeleton-line shrink-0" style="width: 16px; height: 16px"></div>
+              <div class="skeleton-line" style="width: 58%"></div>
+            </div>
           </div>
           <!-- Empty state -->
-          <div id="sftp-empty" class="hidden flex flex-col items-center justify-center py-12 text-on-surface-variant">
-            <span class="material-symbols-outlined mb-2" style="font-size: 36px; font-variation-settings: 'FILL' 0;">folder_off</span>
+          <div id="sftp-empty" class="hidden flex-col items-center justify-center py-12 text-on-surface-variant">
+            <div class="empty-state-badge mb-3" style="width: 60px; height: 60px" aria-hidden="true">
+              <span class="material-symbols-outlined" style="font-size: 28px; font-variation-settings: 'FILL' 0;">folder_off</span>
+            </div>
             <span class="text-xs tracking-wider" data-i18n="sftp.empty">此目录为空</span>
+            <span class="text-[10px] text-dim mt-1.5 tracking-wider" data-i18n="sftp.emptyHint">拖拽文件到此面板即可上传</span>
           </div>
           <!-- Error state -->
           <div id="sftp-error" class="hidden flex flex-col items-center justify-center py-8 px-4 text-error">
@@ -813,12 +844,16 @@ export class SFTPPanel {
     const sorted = sortSFTPEntries(this.entries, this.sortOptions);
     this.renderedEntries = sorted;
 
+    // 行级交错入场仅限中小目录；接近 2000 条上限的大目录批量动画会拖累渲染
+    const animateRows = sorted.length <= 150;
+
     // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
     entriesContainer.innerHTML = sorted
       .map(
         (entry, idx) => `
-      <div class="sftp-entry flex items-center gap-2 px-3 py-1.5 hover:bg-surface-variant cursor-pointer transition-colors border-b border-outline-variant/30 text-[12px]"
+      <div class="sftp-entry${animateRows ? ' sftp-entry--enter' : ''} flex items-center gap-2 px-3 py-1.5 hover:bg-surface-variant cursor-pointer transition-colors border-b border-outline-variant/30 text-[12px]"
            data-idx="${idx}" data-name="${this.escapeHtml(entry.name)}" data-type="${entry.type}"
+           ${animateRows ? `style="--stagger-index: ${Math.min(idx, 24)}"` : ''}
            role="option" aria-selected="${this.selectedEntries.has(entry.name)}" tabindex="-1">
         <span class="material-symbols-outlined shrink-0 ${entry.isDir ? 'text-primary-container' : entry.isLink ? 'text-secondary-container' : 'text-on-surface-variant'}"
               style="font-size: 16px; font-variation-settings: 'FILL' ${entry.isDir ? '1' : '0'};">

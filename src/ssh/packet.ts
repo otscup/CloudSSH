@@ -144,7 +144,7 @@ export class SSHPacketParser {
       const lengthField = raw.subarray(0, 4);
       const dataToDecrypt = raw.subarray(4);
       const decrypted = await decrypt(dataToDecrypt, this.seqNum, lengthField, true);
-      if (!decrypted) return null;
+      if (!decrypted) throw new Error('SSH packet decryption/authentication failed');
 
       const paddingLength = decrypted[0];
       if (paddingLength < 4 || paddingLength >= packetLength) {
@@ -168,7 +168,7 @@ export class SSHPacketParser {
     if (!encryptedHeader) return null;
 
     const header = await decrypt(encryptedHeader, this.seqNum, undefined, false);
-    if (!header) return null;
+    if (!header) throw new Error('SSH packet header decryption failed');
 
     const packetLength = readUint32(header, 0);
     if (packetLength > MAX_PACKET_SIZE) {
@@ -187,7 +187,7 @@ export class SSHPacketParser {
     if (!encryptedPacket || !mac) return null;
 
     const decrypted = await decrypt(encryptedPacket, this.seqNum, undefined, true);
-    if (!decrypted) return null;
+    if (!decrypted) throw new Error('SSH packet decryption failed');
 
     if (verifyMac && macLength > 0) {
       const macValid = await verifyMac(decrypted, mac, this.seqNum);
@@ -210,6 +210,13 @@ export class SSHPacketParser {
       payload,
       mac,
     };
+  }
+
+  clear(): void {
+    this.chunks = [];
+    this.chunkIndex = 0;
+    this.readOffset = 0;
+    this.bufferedLength = 0;
   }
 
   getSeqNum(): number {

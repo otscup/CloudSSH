@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { mockAnonymousSession } from './helpers';
 
 test('隧道上传扩大初始窗口但无 ACK 时仍严格限制在 2MiB', async ({ page }) => {

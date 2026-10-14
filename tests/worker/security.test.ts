@@ -88,6 +88,53 @@ afterEach(() => {
 // 1. auth.ts — OAuth 回调 CSRF 防护
 // =====================================================================
 
+describe('内部 SSH 头部只能由 Worker 权威注入', () => {
+  it.each([
+    '/api/ssh',
+    '/api/ssh?token=123:ticket',
+    '/api/ssh?session=session-1&resume_token=resume',
+    '/api/ssh/sftp?session=session-1&token=attach',
+  ])('清除 %s 上客户端传入的设备公钥', async path => {
+    const worker = await loadWorker();
+    let forwarded: Request | undefined;
+    const sshSessionStub = makeDOStub(request => {
+      forwarded = request;
+      return new Response('forwarded');
+    });
+    const userDbStub = makeDOStub(() => Response.json({
+      host: 'ssh.example.com', port: 22, username: 'alice', githubId: '123',
+    }));
+    const result = await worker.fetch(makeRequest(path, { headers: {
+      Upgrade: 'websocket', Origin: 'https://cloudssh.test', 'x-share-device-key': 'attacker-key',
+    } }), makeEnv({ sshSessionStub, userDbStub }));
+    expect(result.status).toBe(200);
+    expect(forwarded!.headers.get('x-share-device-key')).toBeNull();
+  });
+
+  it.each([null, 'authoritative-device-key'])(
+    '分享设备绑定以 ShareDO 返回的 %s 为准，缺省绝不继承外部头部', async devicePubKey => {
+      const worker = await loadWorker();
+      const shareRef = 'r'.repeat(43);
+      let forwarded: Request | undefined;
+      const sshSessionStub = makeDOStub(request => {
+        forwarded = request;
+        return new Response('forwarded');
+      });
+      const sshShareStub = makeDOStub(() => Response.json({
+        config: { host: 'ssh.example.com', port: 22, username: 'alice', githubId: '123',
+          sessionPolicy: { source: 'share', shareRef } }, devicePubKey,
+      }));
+      const result = await worker.fetch(makeRequest(
+        `/api/ssh?share_ref=${shareRef}&share_ticket=${'t'.repeat(43)}`, { headers: {
+          Upgrade: 'websocket', Origin: 'https://cloudssh.test', 'x-share-device-key': 'attacker-key',
+        } }
+      ), makeEnv({ ENABLE_SSH_SHARING: 'true', sshSessionStub, sshShareStub }));
+      expect(result.status).toBe(200);
+      expect(forwarded!.headers.get('x-share-device-key')).toBe(devicePubKey);
+    }
+  );
+});
+
 describe('安全 — OAuth 回调 CSRF 防护', () => {
   it('state 与 cookie 中 oauth_state 不匹配 → 403', async () => {
     // 攻击者诱导用户点击构造链接：query.state=attacker_state，但用户浏览器里 cookie 是合法 state

@@ -1,8 +1,9 @@
-// Blacklist-based command safety logic
+// Best-effort command guardrails, NOT a shell sandbox or a complete security boundary.
 
 /**
  * Check if a command is blocked (never allowed)
- * This is the ultimate fallback to prevent catastrophic destruction.
+ * Recognizes direct catastrophic commands only; wrappers/obfuscation need confirmation below.
+ * Never execute or expand the command locally to classify it.
  */
 export function isBlockedCommand(command: string): { blocked: boolean; reason?: string } {
   const trimmed = command.trim();
@@ -51,9 +52,41 @@ export function isBlockedCommand(command: string): { blocked: boolean; reason?: 
 export function needsConfirmation(command: string): { required: boolean; reason?: string } {
   const trimmed = command.trim();
   const normalized = trimmed.toLowerCase();
+  // 仅在命令位置识别执行器，避免把 grep node / find . 当作代码执行。
+  // 常用启动器的参数（sudo -u root / env KEY=value）也纳入有限匹配。
+  const executionPrefix =
+    String.raw`(?:^|[;&|()\n])\s*` +
+    String.raw`(?:(?:sudo|env|command|exec|nohup|busybox)\s+(?:[^\s;&|()]+\s+)*?)?` +
+    String.raw`(?:[^\s;&|()]*\/)?`;
 
-  // 高危操作黑名单（正则表达式匹配）
+  // 不尝试还原动态 Shell 代码：执行包裹与 IFS 混淆统一交给用户确认。
+  // 包括绝对路径解释器、管道/stdin 脚本与组合参数（bash -lc / python -c 等）。
+  // 有意允许一定误报；正则不是完整 Shell 解析器，也不保证拦住所有绕过。
   const DANGEROUS_PATTERNS = [
+    { pattern: /\$(?:\{ifs[^}]*\}|ifs\b)/, reason: '使用 IFS 动态构造命令' },
+    { pattern: new RegExp(`${executionPrefix}eval(?=\\s|[;&|()]|$)`), reason: 'eval 动态执行命令' },
+    {
+      pattern: new RegExp(`${executionPrefix}(?:sh|bash|dash|ash|zsh|ksh|fish)(?=\\s|[;&|()]|$)`),
+      reason: 'Shell 包裹或脚本执行',
+    },
+    {
+      pattern: new RegExp(
+        executionPrefix +
+        String.raw`(?:python(?:\d+(?:\.\d+)*)?|pypy\d*|perl|ruby|node(?:js)?|php|` +
+        String.raw`lua(?:\d+(?:\.\d+)*)?|awk|gawk|mawk)(?=\s|[;&|()]|$)`
+      ),
+      reason: '解释器执行代码或脚本',
+    },
+    // 嵌入 docker exec / find -exec / xargs 等非枚举启动器时，仍识别显式代码参数。
+    {
+      pattern: /(^|[\s;&|()])(?:[^\s;&|()]*\/)?(?:sh|bash|dash|ash|zsh|ksh|fish)\s+-[^\s;&|()]*c(?=\s|[;&|()]|$)/,
+      reason: 'Shell 动态代码执行',
+    },
+    {
+      pattern: /(^|[\s;&|()])(?:[^\s;&|()]*\/)?(?:python\d*|perl|ruby|node(?:js)?|php|lua)\s+(?:-[cer]|--eval)(?=\s|[;&|()]|$)/,
+      reason: '解释器动态代码执行',
+    },
+    { pattern: new RegExp(`${executionPrefix}(?:source|\\.)(?=\\s)`), reason: '在当前 Shell 执行脚本' },
     { pattern: /(^|[\s;&|()])rm(?=\s|[;&|()]|$)/, reason: '删除文件操作' },
     { pattern: /(^|[\s;&|()])reboot(?=\s|[;&|()]|$)/, reason: '重启服务器' },
     { pattern: /(^|[\s;&|()])shutdown(?=\s|[;&|()]|$)/, reason: '关闭服务器' },

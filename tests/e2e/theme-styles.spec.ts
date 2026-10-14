@@ -1,7 +1,8 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { blockOptionalThirdPartyAssets } from './helpers';
+import { mockThemeLibrary } from './theme-mocks';
 
 const server = {
   id: 1,
@@ -20,13 +21,6 @@ const server = {
 
 test.beforeEach(async ({ page }) => {
   await blockOptionalThirdPartyAssets(page);
-  await page.route('**/api/user/theme', (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: route.request().method() === 'GET' ? '{"theme":null}' : '{"success":true}',
-    })
-  );
   await page.route('**/api/auth/me', (route) =>
     route.fulfill({
       status: 200,
@@ -85,7 +79,6 @@ test('云端主题恢复不阻塞用户空间首屏，并避免覆盖加载期�
   const themeRequestGate = new Promise<void>((resolve) => {
     releaseThemeRequest = resolve;
   });
-  await page.unroute('**/api/user/theme');
   await page.route('**/api/user/theme', async (route) => {
     await themeRequestGate;
     await route.fulfill({
@@ -159,6 +152,12 @@ test('终端四周留白按形状收窄并为圆角保留安全间距', async ({
 });
 
 test('应用导入 Theme V2 JSON 后覆盖本地主题并同步账号', async ({ page }) => {
+  const savedPayloads: unknown[] = [];
+  await page.route('**/api/user/theme', (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    savedPayloads.push(route.request().postDataJSON());
+    return route.fulfill({ json: { success: true } });
+  });
   const themeRequestMethods: string[] = [];
   page.on('request', (request) => {
     if (request.url().includes('/api/user/theme')) {
@@ -189,6 +188,9 @@ test('应用导入 Theme V2 JSON 后覆盖本地主题并同步账号', async ({
     },
   };
 
+  const savedResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === '/api/user/theme' && response.request().method() === 'PUT'
+  );
   await page.locator('#import-theme-input').setInputFiles({
     name: 'ocean-soft.json',
     mimeType: 'application/json',
@@ -204,10 +206,17 @@ test('应用导入 Theme V2 JSON 后覆盖本地主题并同步账号', async ({
     .toContain('Ocean Soft');
   expect(themeRequestMethods).toEqual(expect.arrayContaining(['GET', 'PUT']));
   expect(themeRequestMethods).not.toContain('DELETE');
+  expect((await savedResponse).status()).toBe(200);
+  expect(savedPayloads).toContainEqual(expect.objectContaining({
+    active_id: expect.stringMatching(/^cth_/),
+    themes: [expect.objectContaining({
+      name: 'Ocean Soft',
+      data: expect.objectContaining({ name: 'Ocean Soft', schemaVersion: 4 }),
+    })],
+  }));
 });
 
 test('新浏览器登录后自动恢复并启用账号中的自定义主题', async ({ page }) => {
-  await page.unroute('**/api/user/theme');
   await page.route('**/api/user/theme', (route) =>
     route.fulfill({
       status: 200,
@@ -334,6 +343,7 @@ test('AI 模型选择下拉面板在浅色与暗色内置主题下无缝自适�
 });
 
 test('自定义主题分段控制器交互与管理弹窗上传/多套管理/删除回退', async ({ page }) => {
+  const api = await mockThemeLibrary(page, { methods: ['GET', 'PUT', 'DELETE'] });
   await page.goto('/');
 
   // 1. 验证独立上传按钮已被移除
@@ -374,6 +384,16 @@ test('自定义主题分段控制器交互与管理弹窗上传/多套管理/删
   // 验证列表出现新主题卡片，并且处于激活状态
   await expect(themeModal.locator('#custom-theme-items-container')).toContainText('Neon Horizon');
   await expect(themeModal.locator('#custom-theme-items-container')).toContainText('Active');
+  await expect.poll(() => api.cloud.themes.length).toBe(1);
+  const savedTheme = api.cloud.themes[0];
+  expect(savedTheme).toMatchObject({ name: 'Neon Horizon', data: { schemaVersion: 4 } });
+  expect(api.cloud.activeId).toBe(savedTheme.id);
+  expect(api.requests.filter((request) => request.method === 'PUT')).toEqual(
+    expect.arrayContaining([expect.objectContaining({
+      status: 200,
+      body: expect.objectContaining({ active_id: savedTheme.id }),
+    })])
+  );
 
   // 关闭弹窗并验证分段控制器选中 Custom
   await themeModal.locator('#custom-theme-modal-close-btn').click();
@@ -397,4 +417,9 @@ test('自定义主题分段控制器交互与管理弹窗上传/多套管理/删
   // 验证主题回退到内置主题（cyberpunk），Custom 不再处于选中状态
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'cyberpunk');
   await expect(customSegmentBtn).toHaveAttribute('aria-selected', 'false');
+  await expect.poll(() => api.cloud.themes.length).toBe(0);
+  expect(api.cloud.activeId).toBeNull();
+  expect(api.requests.filter((request) => request.method === 'DELETE')).toEqual([
+    expect.objectContaining({ id: savedTheme.id, status: 200 }),
+  ]);
 });

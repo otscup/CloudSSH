@@ -327,7 +327,9 @@ describe('SFTP 目录递归删除 (rmdirRecursive)', () => {
 
     await handler.removeDirectory('/home/developer/empty_dir');
 
-    expect(sftp.rmdir).toHaveBeenCalledWith('/home/developer/empty_dir');
+    expect(sftp.rmdir).toHaveBeenCalledWith('/home/developer/empty_dir', {
+      deadline: expect.any(Number),
+    });
     expect(sendJSON).toHaveBeenCalledWith({
       type: 'sftp_rmdir_result',
       path: '/home/developer/empty_dir',
@@ -360,19 +362,19 @@ describe('SFTP 目录递归删除 (rmdirRecursive)', () => {
         if (sftp.listAllEntries.mock.calls.length === 1) {
           return {
             entries: [
-              { filename: '.', attrs: { permissions: 0o040000 | 0o755 } },
-              { filename: '..', attrs: { permissions: 0o040000 | 0o755 } },
-              { filename: 'file1.txt', attrs: { permissions: 0o100000 | 0o644 } },
-              { filename: 'sub_dir', attrs: { permissions: 0o040000 | 0o755 } },
+              { filename: '.', longname: '', attrs: { permissions: 0o040000 | 0o755 } },
+              { filename: '..', longname: '', attrs: { permissions: 0o040000 | 0o755 } },
+              { filename: 'file1.txt', longname: '', attrs: { permissions: 0o100000 | 0o644 } },
+              { filename: 'sub_dir', longname: '', attrs: { permissions: 0o040000 | 0o755 } },
             ],
             isTruncated: false,
           };
         }
         return {
           entries: [
-            { filename: '.', attrs: { permissions: 0o040000 | 0o755 } },
-            { filename: '..', attrs: { permissions: 0o040000 | 0o755 } },
-            { filename: 'sub_file.txt', attrs: { permissions: 0o100000 | 0o644 } },
+            { filename: '.', longname: '', attrs: { permissions: 0o040000 | 0o755 } },
+            { filename: '..', longname: '', attrs: { permissions: 0o040000 | 0o755 } },
+            { filename: 'sub_file.txt', longname: '', attrs: { permissions: 0o100000 | 0o644 } },
           ],
           isTruncated: false,
         };

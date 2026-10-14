@@ -27,6 +27,7 @@ import {
 } from './mobile-input';
 import { currentTerminalFontSize } from './terminal-layout';
 import { localizedSSHMessage } from './terminal-status';
+import { TerminalOutputAck } from './terminal-output-ack';
 import { centerTerminalText } from './terminal-text';
 import { getActiveTerminalTheme, onTerminalThemeChange } from './theme';
 import { confirmAction, notify } from './ui-feedback';
@@ -43,6 +44,8 @@ const NON_RETRIABLE_AUTH_EVENTS = new Set([
   'auth_password_change_required',
   'auth_protocol_error',
   'session_idle_timeout',
+  'output_backlog_closed',
+  'packet_error',
 ]);
 const RTT_HEARTBEAT_INTERVAL_MS = 5000;
 const HEARTBEAT_RESPONSE_TIMEOUT_MS = 10_000;
@@ -150,6 +153,7 @@ export class SSHTerminal {
   private terminalDisposables: { dispose(): void }[] = [];
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private trzszFilter: TrzszFilter | null = null;
+  private terminalOutputAck: TerminalOutputAck | null = null;
   private mounted: boolean = false;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
@@ -1097,6 +1101,12 @@ export class SSHTerminal {
   private setupWebSocketHandlers(rejectFn?: (reason?: any) => void): void {
     if (!this.ws) return;
     const socket = this.ws;
+    this.terminalOutputAck?.dispose();
+    const outputAck = new TerminalOutputAck((frame) => {
+      if (socket !== this.ws || socket.readyState !== WebSocket.OPEN) return;
+      try { socket.send(frame); } catch { /* Socket closed between state check and send. */ }
+    });
+    this.terminalOutputAck = outputAck;
 
     // Trzsz file transfer support
     this.trzszFilter = new TrzszFilter({
@@ -1134,6 +1144,10 @@ export class SSHTerminal {
         }
 
         try {
+          if (msg.type === 'terminal_output_flow') {
+            outputAck.start(msg.id);
+            return;
+          }
           if (msg.type === 'auth_challenge') {
             this.handleAuthChallenge(socket, msg);
             return;
@@ -1246,11 +1260,16 @@ export class SSHTerminal {
         }
       } else {
         this.trzszFilter!.processServerOutput(event.data);
+        // Receipt ACK only: preserves the trzsz pipeline and does not claim that
+        // xterm rendering/file writes have completed. Server bounds WS in-flight bytes.
+        const bytes = event.data instanceof Blob ? event.data.size : event.data.byteLength;
+        outputAck.receive(bytes);
       }
     };
 
     this.ws.onclose = (event) => {
       if (socket !== this.ws) return;
+      outputAck.dispose();
 
       this.authChallengeDialog?.dismiss();
       this.stopHeartbeat();
@@ -1665,6 +1684,8 @@ export class SSHTerminal {
     this.stopHeartbeat();
     this.clearReconnectTimeout();
     this.disposeConnectionDisposables();
+    this.terminalOutputAck?.dispose();
+    this.terminalOutputAck = null;
 
     const socket = this.ws;
     this.ws = null;

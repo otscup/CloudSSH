@@ -841,7 +841,13 @@ export class SSHSessionDO {
         this.env,
         config.userId,
         config.githubId,
-        { waitUntil: (promise) => this.state.waitUntil(promise) }
+        {
+          waitUntil: (promise) => this.state.waitUntil(promise),
+          colo,
+          onRttUpdated: (latestLatency, latestColo) => {
+            this.sessionBaselines.set(session, { latencyMs: latestLatency, colo: latestColo });
+          },
+        }
       );
       chainSessions.push(session);
       this.sessionChains.set(ws, chainSessions);

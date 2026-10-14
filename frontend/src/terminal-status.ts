@@ -30,6 +30,7 @@ const SSH_EVENT_KEYS: Record<string, TranslationKey> = {
   session_idle_timeout: 'terminal.status.sessionIdleTimeout',
   session_idle_warning: 'terminal.status.sessionIdleWarning',
   input_backlog_closed: 'terminal.status.inputBacklogClosed',
+  output_backlog_closed: 'terminal.status.outputBacklogClosed',
   packet_error: 'terminal.status.packetError',
   algorithm_error: 'terminal.status.algorithmError',
   service_error: 'terminal.status.serviceError',

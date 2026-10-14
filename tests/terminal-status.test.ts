@@ -55,6 +55,12 @@ describe('SSH 状态国际化', () => {
     ).toBe('Packet processing error: invalid packet');
   });
 
+  it('输出闸门关闭事件使用本地化文案', () => {
+    expect(localizedSSHMessage('后端回退消息', 'output_backlog_closed')).toBe(
+      'Terminal output backlog exceeded or client acknowledgement timed out, connection closed'
+    );
+  });
+
   it('未知事件保持后端原始消息，兼容旧服务端', () => {
     expect(localizedSSHMessage('legacy message', 'unknown_event')).toBe('legacy message');
   });

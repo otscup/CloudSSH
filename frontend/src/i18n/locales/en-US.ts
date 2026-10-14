@@ -373,6 +373,7 @@ export const enUS: Record<keyof typeof zhCN, string> = {
   'terminal.status.sessionIdleWarning':
     'Session idle, will disconnect soon to save resources (press any key to continue)',
   'terminal.status.inputBacklogClosed': 'Terminal input backlog exceeded, connection closed',
+  'terminal.status.outputBacklogClosed': 'Terminal output backlog exceeded or client acknowledgement timed out, connection closed',
   'terminal.status.packetError': 'Packet processing error: {message}',
   'terminal.status.algorithmError': 'Algorithm negotiation failed: {message}',
   'terminal.status.serviceError': 'SSH service request failed: {message}',
@@ -453,6 +454,7 @@ export const enUS: Record<keyof typeof zhCN, string> = {
   'sftp.modified': 'Modified',
   'sftp.actions': 'Actions',
   'sftp.empty': 'This directory is empty',
+  'sftp.emptyHint': 'Drag files into this panel to upload',
   'sftp.connecting': 'Connecting to SFTP…',
   'sftp.reconnecting': 'Reconnecting to SFTP…',
   'sftp.waitingWebSocket': 'Waiting for the SFTP connection URL…',

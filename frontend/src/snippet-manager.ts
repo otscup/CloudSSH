@@ -15,6 +15,7 @@ import {
   SNIPPET_NAME_MAX_LENGTH,
 } from '../../src/snippet-schema';
 import { copyTextToClipboard } from './clipboard';
+import { attachDrawerSwipeToClose } from './drawer-swipe';
 import { onLocaleChange, t } from './i18n';
 import {
   type CommandSnippet,
@@ -193,12 +194,29 @@ export class SnippetManager {
 
   private async reload(): Promise<void> {
     const listEl = document.getElementById('snippet-list');
+    this.renderListSkeleton(listEl);
     try {
       this.snippets = await this.store.list();
       this.render();
     } catch {
       if (listEl) listEl.textContent = t('snippets.loadFailed');
       notify(t('snippets.loadFailed'), { variant: 'danger' });
+    }
+  }
+
+  private renderListSkeleton(listEl: HTMLElement | null): void {
+    if (!listEl) return;
+    listEl.textContent = '';
+    listEl.setAttribute('aria-busy', 'true');
+    for (let i = 0; i < 3; i++) {
+      const card = createElement('div', 'skeleton-card space-y-2');
+      card.setAttribute('aria-hidden', 'true');
+      const title = createElement('div', 'skeleton-line');
+      title.style.width = '42%';
+      const body = createElement('div', 'skeleton-line');
+      body.style.width = '78%';
+      card.append(title, body);
+      listEl.appendChild(card);
     }
   }
 
@@ -225,6 +243,10 @@ export class SnippetManager {
     panel.id = PANEL_ID;
     panel.style.transform = 'translateX(100%)';
     this.panelContainer = panel;
+    attachDrawerSwipeToClose(panel, {
+      headerSelector: '.sftp-panel-header',
+      onClose: () => this.close(),
+    });
 
     // 1. Header 栏
     panel.appendChild(this.createHeader());
@@ -691,6 +713,7 @@ export class SnippetManager {
     const footerStatus = document.getElementById('snippet-footer-status');
     if (!listEl) return;
     listEl.textContent = '';
+    listEl.removeAttribute('aria-busy');
 
     const filtered = filterSnippets(this.snippets, this.searchQuery, this.selectedCategory);
 
@@ -709,9 +732,14 @@ export class SnippetManager {
         'div',
         'flex flex-col items-center justify-center h-48 text-muted space-y-2'
       );
-      const icon = createIcon('inbox', '36px');
-      icon.className = 'material-symbols-outlined opacity-40';
-      emptyBox.appendChild(icon);
+      const badge = createElement('div', 'empty-state-badge');
+      badge.setAttribute('aria-hidden', 'true');
+      badge.style.width = '60px';
+      badge.style.height = '60px';
+      badge.style.marginBottom = '8px';
+      const icon = createIcon('inbox', '28px');
+      badge.appendChild(icon);
+      emptyBox.appendChild(badge);
       emptyBox.appendChild(createElement('p', 'text-xs', t('snippets.empty')));
       listEl.appendChild(emptyBox);
       return;
@@ -722,9 +750,14 @@ export class SnippetManager {
         'div',
         'flex flex-col items-center justify-center h-48 text-muted space-y-2'
       );
-      const icon = createIcon('search_off', '36px');
-      icon.className = 'material-symbols-outlined opacity-40';
-      emptyBox.appendChild(icon);
+      const badge = createElement('div', 'empty-state-badge');
+      badge.setAttribute('aria-hidden', 'true');
+      badge.style.width = '60px';
+      badge.style.height = '60px';
+      badge.style.marginBottom = '8px';
+      const icon = createIcon('search_off', '28px');
+      badge.appendChild(icon);
+      emptyBox.appendChild(badge);
       emptyBox.appendChild(createElement('p', 'text-xs', t('snippets.noMatches')));
       listEl.appendChild(emptyBox);
       return;

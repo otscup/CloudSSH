@@ -4,11 +4,15 @@ import {
   type SFTPFileEntry,
   type SFTPPendingRequest,
   SSH_FILEXFER_ATTR_ACMODTIME,
+  SSH_FILEXFER_ATTR_EXTENDED,
   SSH_FILEXFER_ATTR_PERMISSIONS,
   SSH_FILEXFER_ATTR_SIZE,
   SSH_FILEXFER_ATTR_UIDGID,
   SSH_FX_EOF,
   SSH_FXP_CLOSE,
+  SSH_FXP_ATTRS,
+  SSH_FXP_DATA,
+  SSH_FXP_HANDLE,
   SSH_FXP_INIT,
   SSH_FXP_MKDIR,
   SSH_FXP_NAME,
@@ -26,9 +30,31 @@ import {
   SSH_FXP_WRITE,
 } from './sftp-types';
 import { encodeString, readUint32, writeUint32 } from './utils';
+import { SFTPReader } from './sftp-reader';
 
 const SFTP_VERSION = 3;
 const REQUEST_TIMEOUT_MS = 60000; // 60 seconds for SFTP operations
+// Allows existing 128KiB reads and large NAME batches, while bounding partial packets.
+export const MAX_SFTP_PACKET_BYTES = 1024 * 1024;
+export const MAX_SFTP_RECEIVE_BYTES = 2 * 1024 * 1024;
+const MAX_NAME_ENTRIES = 10_000;
+const MAX_EXTENDED_ATTRIBUTES = 1024;
+export const MAX_SFTP_LIST_ENTRIES = 10_000;
+export const MAX_SFTP_LIST_MEMORY_BYTES = 8 * 1024 * 1024;
+const MAX_SFTP_NAME_FIELD_BYTES = 16 * 1024;
+
+// Conservative accounting for UTF-16 strings plus entry/attribute objects.
+export function estimateSFTPEntryBytes(entry: SFTPFileEntry): number {
+  return 256 + 2 * (entry.filename.length + entry.longname.length);
+}
+const MAX_LIST_REQUESTS = 1024;
+const MAX_EMPTY_LIST_BATCHES = 3;
+
+export interface SFTPRequestOptions { deadline?: number; }
+export interface SFTPListingOptions extends SFTPRequestOptions {
+  beforeRequest?: () => void;
+  maxRequests?: number;
+}
 
 export class SFTPClient {
   private readonly textDecoder = new TextDecoder();
@@ -40,6 +66,7 @@ export class SFTPClient {
   private sendData: ((data: Uint8Array) => void) | null = null;
   private debugFn: ((message: string) => void) | null = null;
   private debugEnabled: boolean = false;
+  private disposedError: Error | null = null;
 
   setSendCallback(fn: (data: Uint8Array) => void): void {
     this.sendData = fn;
@@ -55,10 +82,11 @@ export class SFTPClient {
     this.debugFn(typeof message === 'function' ? message() : message);
   }
 
-  dispose(): void {
+  dispose(error = new Error('SFTP session closed')): void {
+    this.disposedError ??= error;
     for (const [, req] of this.pendingRequests) {
       if (req.timeout) clearTimeout(req.timeout);
-      req.reject(new Error('SFTP session closed'));
+      req.reject(this.disposedError);
     }
     this.pendingRequests.clear();
     this.recvBuffer = new Uint8Array(0);
@@ -76,6 +104,13 @@ export class SFTPClient {
 
   // Feed incoming channel data into the SFTP receive buffer
   feed(data: Uint8Array): void {
+    if (this.disposedError) throw this.disposedError;
+    const pending = this.recvBuffer.length - this.recvOffset;
+    if (data.length > MAX_SFTP_RECEIVE_BYTES - pending) {
+      const error = new Error('SFTP receive buffer limit exceeded');
+      this.dispose(error);
+      throw error;
+    }
     if (this.recvOffset >= this.recvBuffer.length) {
       this.recvBuffer = data;
       this.recvOffset = 0;
@@ -92,9 +127,23 @@ export class SFTPClient {
 
   // Try to extract and dispatch complete SFTP packets from the buffer
   processReceivedPackets(): void {
+    if (this.disposedError) throw this.disposedError;
+    try {
+      this.processBufferedPackets();
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error('Invalid SFTP response');
+      this.dispose(failure);
+      throw failure;
+    }
+  }
+
+  private processBufferedPackets(): void {
     this.debug(() => `[SFTP] processReceived: bufLen=${this.recvBuffer.length - this.recvOffset}`);
     while (this.recvBuffer.length - this.recvOffset >= 4) {
       const packetLen = readUint32(this.recvBuffer, this.recvOffset);
+      if (packetLen < 5 || packetLen > MAX_SFTP_PACKET_BYTES) {
+        throw new Error('Invalid SFTP packet length');
+      }
       const totalLen = 4 + packetLen;
 
       this.debug(
@@ -128,7 +177,13 @@ export class SFTPClient {
     this.debug(() => `[SFTP] handlePacket: type=${type}, len=${data.length}`);
 
     if (type === SSH_FXP_VERSION) {
-      this.version = readUint32(data, 1);
+      const reader = new SFTPReader(data, 1);
+      this.version = reader.uint32();
+      if (this.version !== SFTP_VERSION) throw new Error('Unsupported SFTP version');
+      while (reader.remaining > 0) {
+        reader.stringBytes(); // extension name
+        reader.stringBytes(); // extension data
+      }
       this.debug(() => `[SFTP] VERSION: ${this.version}`);
 
       // Resolve the init request
@@ -144,13 +199,28 @@ export class SFTPClient {
       return;
     }
 
-    // For all other response types, read the request ID at offset 1
+    // Validate complete response structure before resolving any request.
+    switch (type) {
+      case SSH_FXP_STATUS: this.parseStatusResponse(data); break;
+      case SSH_FXP_HANDLE: this.parseHandleResponse(data); break;
+      case SSH_FXP_DATA: this.parseDataResponse(data); break;
+      case SSH_FXP_NAME: this.readNameResponse(data, false); break;
+      case SSH_FXP_ATTRS: this.parseAttrsResponse(data); break;
+      default: throw new Error('Unexpected SFTP response type');
+    }
     const reqId = readUint32(data, 1);
     const req = this.pendingRequests.get(reqId);
     if (!req) {
       return; // stale or unsolicited
     }
 
+    const expected = req.type === SSH_FXP_OPEN || req.type === SSH_FXP_OPENDIR
+      ? SSH_FXP_HANDLE : req.type === SSH_FXP_READ ? SSH_FXP_DATA
+      : req.type === SSH_FXP_READDIR || req.type === SSH_FXP_REALPATH ? SSH_FXP_NAME
+      : req.type === SSH_FXP_STAT ? SSH_FXP_ATTRS : SSH_FXP_STATUS;
+    if (type !== SSH_FXP_STATUS && type !== expected) {
+      throw new Error('SFTP response does not match request');
+    }
     if (req.timeout) clearTimeout(req.timeout);
     this.pendingRequests.delete(reqId);
 
@@ -161,8 +231,16 @@ export class SFTPClient {
     return ++this.requestId;
   }
 
-  private sendRequest(requestId: number, type: number, payload: Uint8Array): Promise<Uint8Array> {
+  private sendRequest(
+    requestId: number, type: number, payload: Uint8Array, options: SFTPRequestOptions = {}
+  ): Promise<Uint8Array> {
     return new Promise((resolve, reject) => {
+      if (this.disposedError) { reject(this.disposedError); return; }
+      const remaining = options.deadline === undefined ? REQUEST_TIMEOUT_MS : options.deadline - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 0) {
+        reject(new Error('SFTP operation deadline exceeded'));
+        return;
+      }
       if (!this.sendData) {
         reject(new Error('SFTP send callback not set'));
         return;
@@ -178,15 +256,21 @@ export class SFTPClient {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         reject(new Error('SFTP request timeout'));
-      }, REQUEST_TIMEOUT_MS);
+      }, Math.min(REQUEST_TIMEOUT_MS, remaining));
 
       this.pendingRequests.set(requestId, { requestId, type, resolve, reject, timeout });
-      this.sendData(packet);
+      try { this.sendData(packet); }
+      catch (error) {
+        clearTimeout(timeout);
+        this.pendingRequests.delete(requestId);
+        reject(error);
+      }
     });
   }
 
   // Wait for init/version exchange
   async waitForVersion(): Promise<number> {
+    if (this.disposedError) throw this.disposedError;
     this.debug(() => `[SFTP] waitForVersion: pending=${this.pendingRequests.size}`);
 
     const data = await new Promise<Uint8Array>((resolve, reject) => {
@@ -209,67 +293,68 @@ export class SFTPClient {
     data: Uint8Array,
     offset: number
   ): { attrs: SFTPFileAttributes; consumed: number } {
+    const reader = new SFTPReader(data, offset);
+    const attrs = this.readAttributes(reader);
+    return { attrs, consumed: reader.position - offset };
+  }
+
+  private readAttributes(reader: SFTPReader): SFTPFileAttributes {
     const attrs: SFTPFileAttributes = {};
-    let pos = offset;
-
-    const flags = readUint32(data, pos);
-    pos += 4;
-
+    const flags = reader.uint32();
+    if ((flags & ~0x8000000f) !== 0) throw new Error('Unsupported SFTP attribute flags');
     if (flags & SSH_FILEXFER_ATTR_SIZE) {
-      const sizeHigh = readUint32(data, pos);
-      pos += 4;
-      const sizeLow = readUint32(data, pos);
-      pos += 4;
-      attrs.size = sizeHigh * 0x100000000 + sizeLow;
+      attrs.size = reader.uint32() * 0x100000000 + reader.uint32();
+      if (!Number.isSafeInteger(attrs.size)) throw new Error('SFTP file size is out of range');
     }
-
     if (flags & SSH_FILEXFER_ATTR_UIDGID) {
-      attrs.uid = readUint32(data, pos);
-      pos += 4;
-      attrs.gid = readUint32(data, pos);
-      pos += 4;
+      attrs.uid = reader.uint32();
+      attrs.gid = reader.uint32();
     }
-
-    if (flags & SSH_FILEXFER_ATTR_PERMISSIONS) {
-      attrs.permissions = readUint32(data, pos);
-      pos += 4;
-    }
-
+    if (flags & SSH_FILEXFER_ATTR_PERMISSIONS) attrs.permissions = reader.uint32();
     if (flags & SSH_FILEXFER_ATTR_ACMODTIME) {
-      attrs.atime = readUint32(data, pos);
-      pos += 4;
-      attrs.mtime = readUint32(data, pos);
-      pos += 4;
+      attrs.atime = reader.uint32();
+      attrs.mtime = reader.uint32();
     }
-
-    return { attrs, consumed: pos - offset };
+    if (flags & SSH_FILEXFER_ATTR_EXTENDED) {
+      const count = reader.uint32();
+      if (count > MAX_EXTENDED_ATTRIBUTES || count > Math.floor(reader.remaining / 8)) {
+        throw new Error('Invalid SFTP extended attribute count');
+      }
+      for (let i = 0; i < count; i++) {
+        reader.stringBytes();
+        reader.stringBytes();
+      }
+    }
+    return attrs;
   }
 
   // SSH_FXP_OPENDIR
-  async openDir(path: string): Promise<Uint8Array> {
+  async openDir(path: string, options?: SFTPRequestOptions): Promise<Uint8Array> {
     const reqId = this.nextRequestId();
     const pathBytes = encodeString(path);
     const payload = new Uint8Array(pathBytes.length);
     payload.set(pathBytes);
-    return this.sendRequest(reqId, SSH_FXP_OPENDIR, payload);
+    return this.sendRequest(reqId, SSH_FXP_OPENDIR, payload, options);
   }
 
   // SSH_FXP_READDIR
-  async readDir(handle: Uint8Array): Promise<Uint8Array> {
+  async readDir(handle: Uint8Array, options?: SFTPRequestOptions): Promise<Uint8Array> {
     const reqId = this.nextRequestId();
     const payload = new Uint8Array(4 + handle.length);
     writeUint32(payload, 0, handle.length);
     payload.set(handle, 4);
-    return this.sendRequest(reqId, SSH_FXP_READDIR, payload);
+    return this.sendRequest(reqId, SSH_FXP_READDIR, payload, options);
   }
 
   // SSH_FXP_CLOSE
-  async closeHandle(handle: Uint8Array): Promise<void> {
+  async closeHandle(handle: Uint8Array, options?: SFTPRequestOptions): Promise<void> {
     const reqId = this.nextRequestId();
     const payload = new Uint8Array(4 + handle.length);
     writeUint32(payload, 0, handle.length);
     payload.set(handle, 4);
-    await this.sendRequest(reqId, SSH_FXP_CLOSE, payload);
+    const response = await this.sendRequest(reqId, SSH_FXP_CLOSE, payload, options);
+    const status = this.parseStatusResponse(response);
+    if (status.code !== 0) throw new Error(status.message);
   }
 
   // SSH_FXP_STAT
@@ -334,12 +419,12 @@ export class SFTPClient {
   }
 
   // SSH_FXP_REMOVE
-  async removeFile(path: string): Promise<Uint8Array> {
+  async removeFile(path: string, options?: SFTPRequestOptions): Promise<Uint8Array> {
     const reqId = this.nextRequestId();
     const pathBytes = encodeString(path);
     const payload = new Uint8Array(pathBytes.length);
     payload.set(pathBytes);
-    return this.sendRequest(reqId, SSH_FXP_REMOVE, payload);
+    return this.sendRequest(reqId, SSH_FXP_REMOVE, payload, options);
   }
 
   // SSH_FXP_MKDIR
@@ -357,12 +442,12 @@ export class SFTPClient {
   }
 
   // SSH_FXP_RMDIR
-  async rmdir(path: string): Promise<Uint8Array> {
+  async rmdir(path: string, options?: SFTPRequestOptions): Promise<Uint8Array> {
     const reqId = this.nextRequestId();
     const pathBytes = encodeString(path);
     const payload = new Uint8Array(pathBytes.length);
     payload.set(pathBytes);
-    return this.sendRequest(reqId, SSH_FXP_RMDIR, payload);
+    return this.sendRequest(reqId, SSH_FXP_RMDIR, payload, options);
   }
 
   // SSH_FXP_RENAME
@@ -387,103 +472,109 @@ export class SFTPClient {
 
   // Parse SSH_FXP_STATUS response
   parseStatusResponse(data: Uint8Array): { code: number; message: string } {
-    const code = readUint32(data, 5); // skip type(1) + requestId(4)
-    let offset = 9;
-    const msgLen = readUint32(data, offset);
-    offset += 4;
-    const message = this.textDecoder.decode(data.subarray(offset, offset + msgLen));
+    const reader = this.responseReader(data, SSH_FXP_STATUS);
+    const code = reader.uint32();
+    const message = this.textDecoder.decode(reader.stringBytes());
+    reader.stringBytes(); // language tag (mandatory in SFTP v3)
+    reader.end();
     return { code, message: message || getStatusMessage(code) };
   }
 
   // Parse SSH_FXP_HANDLE response
   parseHandleResponse(data: Uint8Array): Uint8Array {
-    let offset = 5; // skip type(1) + requestId(4)
-    const handleLen = readUint32(data, offset);
-    offset += 4;
-    return data.subarray(offset, offset + handleLen);
+    const reader = this.responseReader(data, SSH_FXP_HANDLE);
+    const handle = reader.stringBytes();
+    if (handle.length === 0 || handle.length > 256) throw new Error('Invalid SFTP handle');
+    reader.end();
+    return handle;
   }
 
   // Parse SSH_FXP_DATA response
   parseDataResponse(data: Uint8Array): Uint8Array {
-    let offset = 5; // skip type(1) + requestId(4)
-    const dataLen = readUint32(data, offset);
-    offset += 4;
-    return data.subarray(offset, offset + dataLen);
+    const reader = this.responseReader(data, SSH_FXP_DATA);
+    const bytes = reader.stringBytes();
+    reader.end();
+    return bytes;
   }
 
   // Parse SSH_FXP_NAME response for directory listing
   parseNameResponse(data: Uint8Array): SFTPFileEntry[] {
-    let offset = 5; // skip type(1) + requestId(4)
-    const count = readUint32(data, offset);
-    offset += 4;
+    return this.readNameResponse(data, true);
+  }
 
+  private readNameResponse(data: Uint8Array, collect: boolean): SFTPFileEntry[] {
+    const reader = this.responseReader(data, SSH_FXP_NAME);
+    const count = reader.uint32();
+    // Each entry needs at least two string lengths and attribute flags (12 bytes).
+    if (count > MAX_NAME_ENTRIES || count > Math.floor(reader.remaining / 12)) {
+      throw new Error('Invalid SFTP directory entry count');
+    }
     const entries: SFTPFileEntry[] = [];
     for (let i = 0; i < count; i++) {
-      const filenameLen = readUint32(data, offset);
-      offset += 4;
-      const filename = this.textDecoder.decode(data.subarray(offset, offset + filenameLen));
-      offset += filenameLen;
-
-      const longnameLen = readUint32(data, offset);
-      offset += 4;
-      const longname = this.textDecoder.decode(data.subarray(offset, offset + longnameLen));
-      offset += longnameLen;
-
-      const { attrs, consumed } = this.parseAttributes(data, offset);
-      offset += consumed;
-
-      entries.push({ filename, longname, attrs });
+      const filename = reader.stringBytes(MAX_SFTP_NAME_FIELD_BYTES);
+      const longname = reader.stringBytes(MAX_SFTP_NAME_FIELD_BYTES);
+      const attrs = this.readAttributes(reader);
+      if (collect) entries.push({
+        filename: this.textDecoder.decode(filename),
+        longname: this.textDecoder.decode(longname), attrs,
+      });
     }
-
+    reader.end();
     return entries;
+  }
+
+  private responseReader(data: Uint8Array, type: number): SFTPReader {
+    if (data[0] !== type) throw new Error('Unexpected SFTP response type');
+    return new SFTPReader(data, 5);
   }
 
   // Parse SSH_FXP_ATTRS response
   parseAttrsResponse(data: Uint8Array): SFTPFileAttributes {
-    const { attrs } = this.parseAttributes(data, 5); // skip type(1) + requestId(4)
+    const reader = this.responseReader(data, SSH_FXP_ATTRS);
+    const attrs = this.readAttributes(reader);
+    reader.end();
     return attrs;
   }
 
   // Parse all entries from a full directory listing (may need multiple READDIR calls)
   async listAllEntries(
     handle: Uint8Array,
-    limit?: number
+    limit = MAX_SFTP_LIST_ENTRIES,
+    options: SFTPListingOptions = {}
   ): Promise<{ entries: SFTPFileEntry[]; isTruncated: boolean }> {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_SFTP_LIST_ENTRIES) {
+      throw new Error('Invalid SFTP directory entry limit');
+    }
+    const deadline = options.deadline ?? Date.now() + REQUEST_TIMEOUT_MS;
+    const maxRequests = Math.min(options.maxRequests ?? MAX_LIST_REQUESTS, MAX_LIST_REQUESTS);
     const allEntries: SFTPFileEntry[] = [];
-    let isTruncated = false;
-
-    while (true) {
-      if (limit && allEntries.length >= limit) {
-        isTruncated = true;
-        break;
+    let emptyBatches = 0;
+    let entryBytes = 0;
+    for (let requests = 0; ; requests++) {
+      if (Date.now() >= deadline) throw new Error('SFTP directory listing deadline exceeded');
+      if (requests >= maxRequests) throw new Error('SFTP directory listing request limit exceeded');
+      options.beforeRequest?.();
+      const response = await this.readDir(handle, { deadline });
+      if (Date.now() >= deadline) throw new Error('SFTP directory listing deadline exceeded');
+      if (response[0] === SSH_FXP_STATUS) {
+        const status = this.parseStatusResponse(response);
+        if (status.code === SSH_FX_EOF) return { entries: allEntries, isTruncated: false };
+        throw new Error(status.message);
       }
-
-      try {
-        const response = await this.readDir(handle);
-        const type = response[0];
-
-        if (type === SSH_FXP_STATUS) {
-          const status = this.parseStatusResponse(response);
-          if (status.code === SSH_FX_EOF) break;
-          throw new Error(status.message);
+      if (response[0] !== SSH_FXP_NAME) throw new Error('Unexpected SFTP directory response');
+      const entries = this.parseNameResponse(response);
+      emptyBatches = entries.length === 0 ? emptyBatches + 1 : 0;
+      if (emptyBatches >= MAX_EMPTY_LIST_BATCHES) throw new Error('SFTP directory listing made no progress');
+      for (const entry of entries) {
+        const bytes = estimateSFTPEntryBytes(entry);
+        if (allEntries.length >= limit || bytes > MAX_SFTP_LIST_MEMORY_BYTES - entryBytes) {
+          return { entries: allEntries, isTruncated: true };
         }
-
-        if (type === SSH_FXP_NAME) {
-          const entries = this.parseNameResponse(response);
-          allEntries.push(...entries);
-        }
-      } catch (e) {
-        if (e instanceof Error && e.message.includes('EOF')) break;
-        throw e;
+        allEntries.push(entry);
+        entryBytes += bytes;
       }
+      // At exactly the limit, read once more to distinguish a complete directory
+      // ending in EOF from a truncated one; never collect beyond the cap.
     }
-
-    // truncate to limit if we over-fetched in the last batch
-    if (limit && allEntries.length > limit) {
-      allEntries.length = limit;
-      isTruncated = true;
-    }
-
-    return { entries: allEntries, isTruncated };
   }
 }

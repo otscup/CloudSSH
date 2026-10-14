@@ -37,6 +37,7 @@ import { DetachedSessionBuffer } from './ssh-detached-buffer';
 import { KeyboardInteractiveAuthHandler, type PendingAuthChallenge } from './ssh-interactive-auth';
 import { parseIdleTimeout } from './idle-timeout';
 import { ShareAuditWriter } from './share-audit-writer';
+import { TerminalOutputGuard } from './terminal-output-guard';
 import {
   normalizeTerminalSize,
   type SessionKeys,
@@ -110,6 +111,10 @@ export interface SSHSessionOptions {
    * 未传入时从 env.IDLE_TIMEOUT 解析，默认 30 分钟；0 表示禁用。
    */
   idleTimeoutMs?: number;
+  /** Cloudflare PoP 数据中心标识（如 HKG、SJC 等） */
+  colo?: string;
+  /** 周期性测量到远端 SSH 主机 RTT 后的回调，便于 DO 同步更新基线缓存 */
+  onRttUpdated?: (latency: number, colo: string) => void;
 }
 
 export class SSHSession {
@@ -206,6 +211,9 @@ export class SSHSession {
   private readonly maxKeepaliveFails: number = 3;
   private keepalivePending: boolean = false;
   private keepaliveTimeout: ReturnType<typeof setTimeout> | null = null;
+  private keepaliveSentAt: number | null = null;
+  private colo: string = 'UNKNOWN';
+  private readonly onRttUpdated?: (latency: number, colo: string) => void;
   private lastPacketAt: number = Date.now();
   private lastUserActivityAt: number = Date.now();
   private idleWarningEmitted: boolean = false;
@@ -230,7 +238,13 @@ export class SSHSession {
     }
   > = new Map();
   private channelWindowWaiters: Map<number, Array<() => void>> = new Map();
-  private confirmationResolve: ((approved: boolean) => void) | null = null;
+  private pendingAgentConfirmation: {
+    id: string;
+    command: string;
+    resolve: (approved: boolean) => void;
+    signal?: AbortSignal;
+    onAbort: () => void;
+  } | null = null;
   private env: Env | null = null;
   private userId: string | null = null;
   private githubId: string | null = null;
@@ -255,6 +269,10 @@ export class SSHSession {
   private authenticatedSettled = false;
   private closed = false;
   private readonly detachedBuffer = new DetachedSessionBuffer();
+  private outputFlowAnnounced = false;
+  private readonly terminalOutputGuard = new TerminalOutputGuard(() => {
+    this.closeForOutputBacklog();
+  });
 
   get detachedBufferBytes(): number {
     return this.detachedBuffer.detachedBufferBytes;
@@ -300,6 +318,8 @@ export class SSHSession {
     this.ownsWebSocket = options.ownsWebSocket !== false;
     this.allowKeyboardInteractive = options.allowKeyboardInteractive !== false;
     this.waitUntil = options.waitUntil;
+    this.colo = options.colo || 'UNKNOWN';
+    this.onRttUpdated = options.onRttUpdated;
     this.idleTimeoutMs =
       options.idleTimeoutMs !== undefined
         ? options.idleTimeoutMs
@@ -447,13 +467,14 @@ export class SSHSession {
     let leftover: Uint8Array | null = null;
 
     try {
-      while (true) {
+      while (!this.closed) {
         let value: Uint8Array;
         if (leftover) {
           value = leftover;
           leftover = null;
         } else {
           const result = await reader.read();
+          if (this.closed) break;
           if (result.done) {
             this.sendError('SSH 服务器断开连接 (Socket closed by remote)', 'remote_closed');
             this.close();
@@ -645,7 +666,7 @@ export class SSHSession {
   }
 
   private async processPackets(): Promise<void> {
-    while (true) {
+    while (!this.closed) {
       // Encryption state changes after handling SSH_MSG_NEWKEYS
       // (handlePacket -> enableEncryption). The first encrypted packet can
       // arrive in the same read chunk as NEWKEYS, so these parameters MUST be
@@ -676,6 +697,7 @@ export class SSHSession {
             : undefined
         );
 
+        if (this.closed) return;
         if (!packet) {
           this.sendDebug(
             () => `No more packets, buffer remaining: ${this.packetParser.getBufferLength()}`
@@ -720,6 +742,11 @@ export class SSHSession {
     }
     if (msgType === SSH_MSG_REQUEST_SUCCESS || msgType === SSH_MSG_REQUEST_FAILURE) {
       // Response to our global request (e.g., keepalive)
+      if (this.keepalivePending && this.keepaliveSentAt !== null) {
+        const latency = Math.round(performance.now() - this.keepaliveSentAt);
+        this.keepaliveSentAt = null;
+        this.emitKeepaliveRtt(latency);
+      }
       this.keepalivePending = false;
       this.keepaliveFailCount = 0;
       if (this.keepaliveTimeout) {
@@ -790,6 +817,18 @@ export class SSHSession {
     }
   }
 
+  private emitKeepaliveRtt(latency: number): void {
+    if (latency < 0) return;
+    this.onRttUpdated?.(latency, this.colo);
+    if (this.ownsWebSocket && !this.isDetached() && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ type: 'rtt', latency, colo: this.colo }));
+      } catch {
+        /* 发送失败忽略 */
+      }
+    }
+  }
+
   private startKeepalive(): void {
     this.keepaliveFailCount = 0;
     this.keepalivePending = false;
@@ -812,6 +851,7 @@ export class SSHSession {
         payload.set(KEEPALIVE_REQUEST_NAME, 5);
         payload[5 + KEEPALIVE_REQUEST_NAME.length] = 1; // want_reply = true
 
+        this.keepaliveSentAt = performance.now();
         await this.sendEncrypted(payload);
         this.keepalivePending = true;
 
@@ -823,6 +863,7 @@ export class SSHSession {
               `Keepalive response timeout (${this.keepaliveFailCount}/${this.maxKeepaliveFails})`
             );
             this.keepalivePending = false;
+            this.keepaliveSentAt = null;
             if (this.keepaliveFailCount >= this.maxKeepaliveFails) {
               this.sendError('SSH 连接超时，保活失败', 'keepalive_timeout');
               this.close();
@@ -831,6 +872,8 @@ export class SSHSession {
         }, 10000);
       } catch (e) {
         this.keepaliveFailCount++;
+        this.keepalivePending = false;
+        this.keepaliveSentAt = null;
         this.sendDebug(
           `Keepalive send failed (${this.keepaliveFailCount}/${this.maxKeepaliveFails}): ${e instanceof Error ? e.message : String(e)}`
         );
@@ -866,7 +909,7 @@ export class SSHSession {
       }
       if (this.idleTimeoutMs > 0 && this.isReady() && this.ownsWebSocket && !this.isDetached()) {
         // AI Agent 执行保护：只要 Agent 仍处于运行状态，视作用户委托任务进行中，自动维持连接
-        if (this.agentCore?.getStatus() === 'running') {
+        if (this.agentCore?.getStatus() === 'running' && !this.pendingAgentConfirmation) {
           this.recordUserActivity();
           return;
         }
@@ -2024,13 +2067,7 @@ export class SSHSession {
           if (this.isDetached()) {
             this.handleDetachedTerminalOutput(outputData, channel);
           } else {
-            try {
-              this.ws.send(outputData);
-            } catch (e) {
-              this.sendDebug(
-                () => `Send shell output failed: ${e instanceof Error ? e.message : e}`
-              );
-            }
+            if (!this.forwardTerminalOutput(outputData)) return;
             this.recordShareTerminalOutput(outputData);
             this.queueLocalWindowAdjust(outputData.length, channel);
           }
@@ -2084,13 +2121,7 @@ export class SSHSession {
           if (this.isDetached()) {
             this.handleDetachedTerminalOutput(stderrData, channel);
           } else {
-            try {
-              this.ws.send(stderrData);
-            } catch (e) {
-              this.sendDebug(
-                () => `Send stderr output failed: ${e instanceof Error ? e.message : e}`
-              );
-            }
+            if (!this.forwardTerminalOutput(stderrData)) return;
             this.recordShareTerminalOutput(stderrData);
             this.queueLocalWindowAdjust(stderrData.length, channel);
           }
@@ -2279,6 +2310,12 @@ export class SSHSession {
         }
         if (parsed.type === 'auth_cancel') {
           this.handleKeyboardInteractiveCancel(parsed);
+          return;
+        }
+        if (parsed.type === 'terminal_output_ack') {
+          if (!this.closed && !this.isDetached()) {
+            this.terminalOutputGuard.acknowledge(parsed.id, parsed.bytes);
+          }
           return;
         }
         if (parsed.type === 'ping') {
@@ -3051,10 +3088,7 @@ export class SSHSession {
 
     if (this.agentCore?.getStatus() === 'running') {
       if (supersede) {
-        if (this.confirmationResolve) {
-          this.confirmationResolve(false);
-          this.confirmationResolve = null;
-        }
+        this.finishAgentConfirmation(false);
         this.agentCore.agentAbort('superseded');
       } else {
         this.sendAgentFrame({
@@ -3159,7 +3193,8 @@ export class SSHSession {
         async (uId: string) => this.fetchAgentAIConfig(uId, this.githubId!),
         async (command: string, timeout: number, signal?: AbortSignal) =>
           this.executeAgentCommand(command, timeout, signal),
-        async (command: string, reason: string) => this.askAgentConfirmation(command, reason),
+        async (command: string, reason: string, signal?: AbortSignal) =>
+          this.askAgentConfirmation(command, reason, signal),
         undefined,
         memoryProvider,
         this.waitUntil
@@ -3182,27 +3217,23 @@ export class SSHSession {
    * 这些消息由 durable-object.ts 在调用 handleWebSocketMessage 之前提前路由。
    */
   handleAgentControl(type: string, msg: any): void {
-    this.recordUserActivity();
     if (type === 'agent_confirm') {
-      if (this.confirmationResolve) {
-        this.confirmationResolve(msg.approved === true);
-        this.confirmationResolve = null;
+      const pending = this.pendingAgentConfirmation;
+      if (pending && msg.confirmationId === pending.id && msg.command === pending.command &&
+        typeof msg.approved === 'boolean') {
+        this.recordUserActivity();
+        this.finishAgentConfirmation(msg.approved);
       }
       return;
     }
+    this.recordUserActivity();
     if (type === 'agent_stop') {
-      if (this.confirmationResolve) {
-        this.confirmationResolve(false);
-        this.confirmationResolve = null;
-      }
+      this.finishAgentConfirmation(false);
       this.agentCore?.agentAbort('user_stopped');
       return;
     }
     if (type === 'agent_reset') {
-      if (this.confirmationResolve) {
-        this.confirmationResolve(false);
-        this.confirmationResolve = null;
-      }
+      this.finishAgentConfirmation(false);
       this.agentCore?.resetSession();
       this.sendAgentFrame({
         type: 'agent_frame',
@@ -3363,19 +3394,34 @@ export class SSHSession {
     });
   }
 
-  /**
-   * 等待用户确认/取消。DO 防 Hibernate 由 AgentCore.runLoopKeepAlive 统一保活，
-   * 此处只需注册 resolve 回调即可。
-   */
-  private askAgentConfirmation(command: string, reason: string): Promise<boolean> {
+  /** Waiting is not active execution: user inactivity continues to expire it. */
+  private askAgentConfirmation(
+    command: string, reason: string, signal?: AbortSignal
+  ): Promise<boolean> {
+    if (this.closed || signal?.aborted) return Promise.resolve(false);
+    this.finishAgentConfirmation(false);
+    this.recordUserActivity(); // Start the waiting budget once, never on watchdog ticks.
     return new Promise((resolve) => {
-      this.confirmationResolve = resolve;
+      const id = crypto.randomUUID();
+      const onAbort = () => {
+        if (this.pendingAgentConfirmation?.id === id) this.finishAgentConfirmation(false);
+      };
+      this.pendingAgentConfirmation = { id, command, resolve, signal, onAbort };
+      signal?.addEventListener('abort', onAbort, { once: true });
       this.sendAgentFrame({
-        type: 'agent_frame',
-        subType: 'confirm_required',
-        command,
-        reason,
+        type: 'agent_frame', subType: 'confirm_required', confirmationId: id, command, reason,
       });
+    });
+  }
+
+  private finishAgentConfirmation(approved: boolean): void {
+    const pending = this.pendingAgentConfirmation;
+    if (!pending) return;
+    this.pendingAgentConfirmation = null;
+    pending.signal?.removeEventListener('abort', pending.onAbort);
+    pending.resolve(approved);
+    this.sendAgentFrame({
+      type: 'agent_frame', subType: 'confirm_closed', confirmationId: pending.id,
     });
   }
 
@@ -3412,6 +3458,35 @@ export class SSHSession {
     }
   }
 
+  private closeForOutputBacklog(): void {
+    if (this.closed) return;
+    try {
+      this.sendError('终端输出积压或客户端确认超时，连接已关闭', 'output_backlog_closed');
+    } finally {
+      // Normal close prevents automatic reconnect from restarting noisy commands.
+      this.close(true);
+    }
+  }
+
+  private forwardTerminalOutput(data: Uint8Array): boolean {
+    if (this.closed) return false;
+    if (!this.terminalOutputGuard.reserve(data.byteLength)) {
+      this.closeForOutputBacklog();
+      return false;
+    }
+    try {
+      if (!this.outputFlowAnnounced) {
+        this.ws.send(JSON.stringify({ type: 'terminal_output_flow', id: this.terminalOutputGuard.id }));
+        this.outputFlowAnnounced = true;
+      }
+      this.ws.send(data);
+      return true;
+    } catch {
+      this.closeForOutputBacklog();
+      return false;
+    }
+  }
+
   private handleDetachedTerminalOutput(data: Uint8Array, channel: SSHChannel): void {
     this.detachedBuffer.handleOutput(data, {
       recordTerminalOutput: (d) => this.recordShareTerminalOutput(d),
@@ -3422,6 +3497,10 @@ export class SSHSession {
 
   public setDetached(detached: boolean): void {
     if (this.detachedBuffer.setDetached(detached)) {
+      if (detached) {
+        this.terminalOutputGuard.reset();
+        this.outputFlowAnnounced = false;
+      }
       if (detached && this.config.sessionPolicy?.source === 'share') {
         void this.writeShareAudit('session.detached', {
           detachedAt: Date.now(),
@@ -3477,6 +3556,8 @@ export class SSHSession {
   ): Promise<void> {
     this.recordUserActivity();
     this.ws = newWs;
+    this.terminalOutputGuard.reset();
+    this.outputFlowAnnounced = false;
     this.detachedBuffer.setDetached(false);
 
     // 恢复 SFTP attach URL（若断线期间丢失），保证恢复后可重建 SFTP 数据通道
@@ -3500,6 +3581,9 @@ export class SSHSession {
     // 重发双段延迟基线：上游 SSH 连接未重建，原 CF→源站基线仍有效；
     // 客户端↔CF 段由心跳即时探测补齐
     if (credentials?.baseline) {
+      if (credentials.baseline.colo) {
+        this.colo = credentials.baseline.colo;
+      }
       try {
         this.ws.send(
           JSON.stringify({
@@ -3516,11 +3600,7 @@ export class SSHSession {
     // 2. 补发断线期间暂存的输出数据
     const chunks = this.detachedBuffer.drainOutput();
     for (const chunk of chunks) {
-      try {
-        this.ws.send(chunk);
-      } catch {
-        /* 发送失败不中断补发流程 */
-      }
+      if (!this.forwardTerminalOutput(chunk)) return;
     }
 
     // 3. 恢复因背压积压的 Window 额度
@@ -3545,6 +3625,9 @@ export class SSHSession {
   close(normal: boolean = false): void {
     if (this.closed) return;
     this.closed = true;
+    this.packetParser.clear();
+    this.versionRawBuffer = new Uint8Array(0);
+    this.terminalOutputGuard.dispose();
     this.detachedBuffer.clear();
     this.notifyShareSessionClosed(normal);
     if (!this.authenticatedSettled) {
@@ -3565,6 +3648,8 @@ export class SSHSession {
       clearTimeout(this.keepaliveTimeout);
       this.keepaliveTimeout = null;
     }
+    this.keepalivePending = false;
+    this.keepaliveSentAt = null;
     if (this.idleWatchdogInterval) {
       clearInterval(this.idleWatchdogInterval);
       this.idleWatchdogInterval = null;
@@ -3605,10 +3690,7 @@ export class SSHSession {
       for (const wake of waiters) wake();
     }
     this.channelWindowWaiters.clear();
-    if (this.confirmationResolve) {
-      this.confirmationResolve(false);
-      this.confirmationResolve = null;
-    }
+    this.finishAgentConfirmation(false);
     this.channels.clear();
     this.channelDataQueue = [];
     this.channelDataQueueHead = 0;
