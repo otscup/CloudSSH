@@ -4,6 +4,7 @@
   <p><b>极致轻量 · 开箱即用 · 赛博朋克 UI</b></p>
   <p>
     <a href="https://github.com/newbietan/CloudSSH/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/newbietan/CloudSSH?style=flat&logo=github"></a>
+    <a href="https://afdian.com/a/newbietan" target="_blank"><img alt="Afdian" src="https://img.shields.io/badge/Afdian-爱发电-946ce6?style=flat&logo=afdian&logoColor=white"></a>
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
     <img alt="Cloudflare" src="https://img.shields.io/badge/Cloudflare-F38020?style=flat&logo=cloudflare&logoColor=white">
     <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white">
@@ -16,6 +17,7 @@
     <a href="#architecture">架构设计</a> ·
     <a href="CHANGELOG.md">更新日志</a> ·
     <a href="#contributors">贡献者</a> ·
+    <a href="#sponsor">赞助支持</a> ·
     <a href="#license">开源协议</a>
   </p>
   <p>
@@ -57,6 +59,7 @@
 - [开发说明](#development)
   - [本地开发](#本地开发)
 - [贡献者](#contributors)
+- [赞助支持](#sponsor)
 - [开源协议](#license)
 
 </details>
@@ -493,6 +496,18 @@ test 分支（开发/测试）  ──合并──>  main 分支（生产）
 | [DAVID TB (@tbdavid2019)](https://github.com/tbdavid2019) | 贡献繁体中文（台灣）界面与本地化词典，扩展前端语言切换与主题编辑器繁中支持（#147）   |
 
 名单及贡献说明依据 Git 提交历史与已接收的 Pull Request 整理；同一贡献者在历史中可能使用过不同的 Git 作者名称或邮箱。完整记录请参阅 [GitHub Contributors](https://github.com/newbietan/CloudSSH/graphs/contributors)。欢迎通过 Issue 和 Pull Request 参与项目建设。
+
+<a id="sponsor"></a>
+
+## 赞助支持
+
+如果 CloudSSH 对你的日常工作或学习有所帮助，欢迎通过爱发电赞助支持本项目。你的每一份支持都是项目持续维护与功能迭代的重要动力！
+
+- **爱发电主页**：[https://afdian.com/a/newbietan](https://afdian.com/a/newbietan)
+
+<a href="https://afdian.com/a/newbietan" target="_blank">
+  <img src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt="在爱发电赞助我" width="200">
+</a>
 
 <a id="license"></a>
 

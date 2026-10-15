@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.8] - 2026-10-15
+
+### Added
+
+- **爱发电赞助渠道与文档支持**：
+  - 在 `README.md` 与 `README_en.md` 顶部徽章栏增加爱发电官方品牌紫色（`#946ce6`）与矢量 Logo 徽章；
+  - 增加顶部导航栏与展开目录中的 `赞助支持`（`Sponsor`）锚点索引；
+  - 在「贡献者」与「开源协议」之间新增专门的 `赞助支持` 章节，提供爱发电官方主页链接及官方赞助按钮图片。
+
+### Changed
+
+- **前端语言切换按钮重构与微交互美化**：
+  - **尺寸紧凑化**：将语言切换按钮从继承大尺寸表单控件的 `var(--control-padding-y)`（34–40px 高度）统一定制为精致的 26px 紧凑微药丸胶囊（`border-radius: 9999px`），内边距收敛至 `0 9px`，字号优化为 11px（`font-weight: 500`），地球图标从 1rem（16px）微缩至 13.5px，彻底消除按钮过大、在顶栏和表单头部喧宾夺主的问题。
+  - **灵动微交互与物理动效**：悬停时平滑微抬升 `translateY(-1px)` 并呈现次级强调色微光，地球图标附带 `scale(1.12) rotate(12deg)` 顺滑自转与缩放，点击支持 `scale(0.97)` 按压微弹反馈。
+  - **多主题与移动端自适应**：
+    - 液态玻璃（Liquid Glass）：多层半透苹果风磨砂玻璃胶囊，暗色/浅色下分别具备柔和的内高光与景深阴影，与液态分段器及用户信息胶囊视觉高度一致；
+    - 赛博朋克（Cyberpunk）：半透深黑背景搭配霓虹青（`#00f0ff`）边框与发光辉光；
+    - 标准深色/浅色（Standard Dark / Light）：自然融合当前主题的表面底色与边框体系；
+    - 移动端折叠更多菜单展开时，自动切换为符合 WCAG 无障碍标准的 44px 舒适触控行。
+  - **在线主题编辑器同步**：同步更新 `docs/theme-editor/index.html` 侧边栏语言切换按钮与连接卡片/顶栏的实时预览微药丸样式。
+
 ## [2.6.7] - 2026-10-14
 
 ### Added

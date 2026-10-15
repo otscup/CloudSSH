@@ -4,6 +4,7 @@
   <p><b>Ultra-lightweight · Out-of-the-box · Cyberpunk UI</b></p>
   <p>
     <a href="https://github.com/newbietan/CloudSSH/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/newbietan/CloudSSH?style=flat&logo=github"></a>
+    <a href="https://afdian.com/a/newbietan" target="_blank"><img alt="Afdian" src="https://img.shields.io/badge/Afdian-Sponsor-946ce6?style=flat&logo=afdian&logoColor=white"></a>
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
     <img alt="Cloudflare" src="https://img.shields.io/badge/Cloudflare-F38020?style=flat&logo=cloudflare&logoColor=white">
     <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white">
@@ -16,6 +17,7 @@
     <a href="#architecture">Architecture</a> ·
     <a href="CHANGELOG.md">Changelog</a> ·
     <a href="#contributors">Contributors</a> ·
+    <a href="#sponsor">Sponsor</a> ·
     <a href="#license">License</a>
   </p>
   <p>
@@ -57,6 +59,7 @@
 - [Development](#development)
   - [Local Development](#local-development)
 - [Contributors](#contributors)
+- [Sponsor](#sponsor)
 - [License](#license)
 
 </details>
@@ -494,6 +497,18 @@ Thank you to the following contributors for improving CloudSSH's code, compatibi
 | [DAVID TB (@tbdavid2019)](https://github.com/tbdavid2019) | Contributed Traditional Chinese (zh-TW) interface and localized dictionary, expanding frontend language switching and theme editor support (#147) |
 
 The list and contribution summaries are based on Git history and accepted Pull Requests; one contributor may appear under multiple historical Git author names or email addresses. See [GitHub Contributors](https://github.com/newbietan/CloudSSH/graphs/contributors) for the complete record. Issues and Pull Requests are welcome.
+
+<a id="sponsor"></a>
+
+## Sponsor
+
+If CloudSSH has been helpful to your workflow or projects, consider sponsoring the project on Afdian. Your support helps sustain ongoing maintenance, optimization, and feature development!
+
+- **Afdian**: [https://afdian.com/a/newbietan](https://afdian.com/a/newbietan)
+
+<a href="https://afdian.com/a/newbietan" target="_blank">
+  <img src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt="Sponsor on Afdian" width="200">
+</a>
 
 <a id="license"></a>
 

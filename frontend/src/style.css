@@ -282,29 +282,43 @@ html[data-fx-glow='on'] .cyber-button {
 .language-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 9px;
   color: var(--on-surface-variant);
-  background: color-mix(in srgb, var(--bg-surface) 82%, transparent);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--control-radius);
-  padding: var(--control-padding-y) var(--control-padding-x);
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 600;
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border-strong) 65%, transparent);
+  border-radius: 9999px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1;
+  letter-spacing: 0.01em;
   cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
   transition:
     color var(--motion-fast) ease,
     border-color var(--motion-fast) ease,
     background-color var(--motion-fast) ease,
-    box-shadow var(--motion-fast) ease;
+    box-shadow var(--motion-fast) ease,
+    transform var(--motion-fast) cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .language-toggle:hover {
   color: var(--accent-secondary);
   border-color: var(--accent-secondary);
-  background: var(--accent-glow);
-  box-shadow: 0 0 10px var(--accent-glow);
+  background: color-mix(in srgb, var(--accent-secondary) 10%, var(--bg-surface));
+  box-shadow: 0 2px 8px -1px color-mix(in srgb, var(--accent-secondary) 25%, transparent);
+  transform: translateY(-1px);
+}
+
+.language-toggle:active {
+  transform: translateY(0) scale(0.97);
 }
 
 .language-toggle:focus-visible {
@@ -314,8 +328,33 @@ html[data-fx-glow='on'] .cyber-button {
 
 .language-toggle__icon {
   color: var(--accent-secondary);
-  font-size: 1rem;
+  font-size: 13.5px;
   font-variation-settings: "FILL" 0;
+  flex-shrink: 0;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.language-toggle:hover .language-toggle__icon {
+  transform: scale(1.12) rotate(12deg);
+}
+
+.language-toggle__label,
+.language-toggle [data-language-toggle-label] {
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+/* 赛博朋克风格微调 */
+html[data-theme="cyberpunk"] .language-toggle {
+  background: rgba(18, 18, 18, 0.82);
+  border-color: rgba(0, 240, 255, 0.3);
+  box-shadow: 0 0 6px rgba(0, 240, 255, 0.08);
+}
+
+html[data-theme="cyberpunk"] .language-toggle:hover {
+  border-color: var(--accent-secondary);
+  background: rgba(0, 240, 255, 0.12);
+  box-shadow: 0 0 10px var(--accent-glow);
 }
 
 .theme-selector {
@@ -2965,19 +3004,43 @@ html[data-theme="standard-light"] .drawer-segmented-lens {
   /* 岛内语言切换微药丸 */
   html[data-ui-style="liquid"] .user-space-header-actions .language-toggle {
     border-radius: 9999px;
-    background: transparent;
-    border: 1px solid transparent;
-    padding: 4px 10px;
+    height: 26px;
+    padding: 0 9px;
+    background: rgba(255, 255, 255, 0.4);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    backdrop-filter: blur(14px) saturate(160%);
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    box-shadow: 
+      0 1px 4px -1px rgba(0, 0, 0, 0.04),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.85);
     transition: all 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
   }
 
   html[data-ui-style="liquid"] .user-space-header-actions .language-toggle:hover {
-    background: rgba(255, 255, 255, 0.7);
+    background: rgba(255, 255, 255, 0.75);
     border-color: rgba(255, 255, 255, 0.9);
     box-shadow: 
-      0 2px 8px -2px rgba(0, 0, 0, 0.05),
+      0 3px 10px -2px rgba(0, 0, 0, 0.08),
       inset 0 1px 0 0 rgba(255, 255, 255, 1);
     transform: translateY(-1px);
+  }
+
+  html[data-ui-style="liquid"][data-theme="standard-dark"] .user-space-header-actions .language-toggle,
+  html[data-ui-style="liquid"][data-theme="cyberpunk"] .user-space-header-actions .language-toggle {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: 
+      0 1px 4px -1px rgba(0, 0, 0, 0.2),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.1);
+  }
+
+  html[data-ui-style="liquid"][data-theme="standard-dark"] .user-space-header-actions .language-toggle:hover,
+  html[data-ui-style="liquid"][data-theme="cyberpunk"] .user-space-header-actions .language-toggle:hover {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.35);
+    box-shadow: 
+      0 3px 10px -2px rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 0 rgba(255, 255, 255, 0.18);
   }
 
   /* 岛内用户信息微胶囊 */
@@ -4355,6 +4418,7 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   #user-info {
     width: 100%;
     min-height: 44px;
+    height: auto;
   }
 
   .user-space-header-actions .theme-selector {
@@ -4366,7 +4430,17 @@ html[data-ui-motion="none"] :is(.flicker, .scanlines, .scanline) {
   #user-info {
     justify-content: flex-start;
     gap: 10px;
-    padding: 8px 10px;
+    padding: 8px 12px;
+    border-radius: var(--control-radius);
+    transform: none !important;
+  }
+
+  .user-space-header-actions .language-toggle {
+    font-size: 13px;
+  }
+
+  .user-space-header-actions .language-toggle .language-toggle__icon {
+    font-size: 18px;
   }
 
   #user-info {

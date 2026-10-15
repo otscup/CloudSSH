@@ -110,7 +110,7 @@ export function mountLanguageSwitchers(root: ParentNode = document): void {
     button.className = 'language-toggle';
     button.innerHTML = `
       <span class="material-symbols-outlined language-toggle__icon" aria-hidden="true">language</span>
-      <span data-language-toggle-label></span>
+      <span class="language-toggle__label" data-language-toggle-label></span>
     `;
     button.addEventListener('click', () => setLocale(getAlternateLocale(currentLocale)));
     container.appendChild(button);
