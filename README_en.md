@@ -229,21 +229,15 @@ All feature flags and security controls are managed through Worker environment v
 | `DEBUG_MODE` | Optional | `false` | Detailed protocol debugging switch. When `true`, outputs detailed handshake and protocol logs in API responses and the frontend terminal. | Declared as `false` in `wrangler.toml`. Only enable temporarily when troubleshooting connection handshakes; keep `false` during regular production operation. |
 
 > **Configuration Recommendations & Notes**:
+>
 > 1. **Encrypted Secret Storage**: In the Cloudflare Dashboard under *Settings → Variables and Secrets*, it is strongly recommended to store all sensitive variables containing passwords, Secrets, or Keys as **Secret** type. Secrets are stored in Cloudflare's dedicated encrypted storage layer and will not be overwritten when rebuilding or redeploying code.
-> 2. **Credential storage boundary**: Saved SSH credentials, AI API keys, tunnel Service Tokens, and sensitive server memory use AES-GCM storage, but the root encryption secret resides in the same UserDBDO SQLite database (`system_config.encryption_secret`). This avoids plaintext credential columns, but does not protect against a full database leak including the key, compromised database read access, or Worker code execution. It is not independent Secret/KMS protection.
-> 3. **Reserved Variables**: `MAX_CONNECTIONS` is declared as an interface placeholder for future connection budgeting; it is currently unread by runtime code, so do not rely on it.
->
-> 4. **Terminal output backlog protection**: stdout and stderr share a 4MiB unacknowledged-receipt budget. Overflow, or 60s without valid acknowledgement progress while output is pending, closes the session normally without automatic reconnect. This is not a lifetime output limit or a cost cap for continuously flowing output; receipt ACKs do not mean terminal rendering or file writes have completed. Refresh existing pages after upgrading: older frontends do not send ACKs and will also trigger the guard. Agent approvals also require the new one-shot confirmation ID; older pages cannot approve. Waiting for approval remains subject to `IDLE_TIMEOUT` (`0` explicitly disables it).
->
-> 5. **SFTP recursive deletion budgets**: Each directory is capped at 10,000 entries and 8MiB of estimated entry memory. The whole tree shares limits of 50,000 entries, 16MiB cumulative estimated entry memory, 100,000 requests, depth 64, and five minutes. Truncation or exhausted budgets fail explicitly rather than partially deleting the truncated directory; earlier completed deletions are not rolled back. Repeated empty batches and malformed packets also fail promptly, with at most five extra seconds for a handle-cleanup attempt.
->
-> 6. **Wrangler deploy variable authority**: Instances deployed via Git integration / CLI (wrangler) treat `wrangler.toml` as the configuration source of truth — same-name plain-text variables in the Dashboard are overwritten on deploy, while **Secret-type values are unaffected**. `IDLE_TIMEOUT` / `REQUIRE_GITHUB_AUTH` / `ENABLE_SSH_SHARING` / `STRICT_HOST_KEY_VERIFY` ship via `[vars]` by default; customize them directly in `wrangler.toml`. Opt-in variables such as `TURNSTILE` and `ADMIN_PASSWORD_HASH` are best maintained as Dashboard Secrets.
+> 2. **Reserved Variables**: `MAX_CONNECTIONS` is declared as an interface placeholder for future connection budgeting; it is currently unread by runtime code, so do not rely on it.
 
 #### Optional: Enable Single-Admin Password Sign-In (Alternative to GitHub OAuth)
 
 Prefer signing in with your own custom password instead of GitHub OAuth? The instance then admits a single account — yours:
 
-1. **Generate the hash**: Enter your custom password (≥ 10 characters), confirm it, click "Generate hash", and copy the result. **The password never leaves your browser** — no local tooling required (with a Node environment you can also use `pnpm run hash-password`). Ways to open the generator:
+1. **Generate the hash**: Enter your custom password (≥ 10 characters), confirm it, click "Generate hash", and copy the result. **The password never leaves your browser** — no local tooling required. Ways to open the generator:
    - Fresh deployment (no sign-in configured): open your site and click "**Admin password sign-in setup**" at the bottom of the auth form;
    - Instances already using GitHub sign-in (including `REQUIRE_GITHUB_AUTH=true` forced login): open `https://your-domain/#password-setup` directly — no existing variables need touching;
    - Password rotation: open `#password-setup`, regenerate, and replace the Dashboard variable.
@@ -307,7 +301,7 @@ With GitHub OAuth enabled, users can log in with their GitHub account and save/m
 
 1. **Redeploy**: Save the variables and redeploy the existing Worker. The Durable Object migration in the repository initializes the required classes and database; deleting the existing Worker is not required.
 
-> **Access Policy Note**: After `GITHUB_ALLOWED_USER_IDS` changes, existing sessions are checked again and become invalid on their next request; already established SSH WebSockets are not terminated. `REQUIRE_GITHUB_AUTH=true` depends on GitHub OAuth, so configure the Client ID, Client Secret, and `BASE_URL` together.
+> **Access Policy Note**: After `GITHUB_ALLOWED_USER_IDS` changes, existing sessions are checked again and become invalid on their next request; `REQUIRE_GITHUB_AUTH=true` depends on GitHub OAuth, so configure the Client ID, Client Secret, and `BASE_URL` together.
 
 ##### Using One-Time SSH Sharing
 
@@ -350,13 +344,7 @@ When adding or editing a server, choose the **"Cloudflare Tunnel"** transport mo
   - **Supported Providers**: Official OpenAI (`https://api.openai.com/v1`, models such as `gpt-4o`, `o1`, `o3-mini`, etc.), OpenRouter, and compatible platforms supporting the standard Responses API specification.
   - **Currently Unsupported Providers**: Gateways providing only legacy Chat Completions (`/v1/chat/completions`) endpoints (such as direct DeepSeek API, Alibaba DashScope, Moonshot Kimi, etc.) will return HTTP 404/405 on `/responses`.
   - **Recommendation**: If your current workflows rely heavily on models available exclusively through `/v1/chat/completions`, **it is recommended to temporarily stay on version v2.5.5** until upstream providers adopt the Responses specification.
-- **Configuration & Migration**: Configure an HTTPS API root (for example `https://api.openai.com/v1`) or a complete `/responses` address, model, and key. Legacy `/chat/completions` URLs are blocked and must be changed to the root URL. Changing the address strictly requires providing the API key (anti-credential-exfiltration defense preventing silent transmission of keys to new targets).
-- **Capability Requirements**: The provider and model must support the native Responses API: stateless execution (`store: false`), function tools, streaming Responses events, and JSON Schema output. Successful `/models` discovery does not prove these capabilities.
-- **Privacy & Data Retention**: All requests enforce `store: false` (stateless mode), preventing terminal output, command results, and credentials from being retained long-term on the model provider. History, checkpoints, and server memories remain controlled locally within CloudSSH.
-- **Context Budgets & Checkpoints**: The default context budget is 64,000 tokens and output budget 8,192 tokens (including reasoning). Usage is measured when available and conservatively estimated otherwise. Structured checkpoints start fresh continuation segments at the budget boundary without rewriting historical facts.
-- **Editing Branches & Verified Facts**: Edit checkpoints retain up to 64 recent user turns within a 512K-character total budget. Editing branches from before that turn and **does not undo remote operations**. Start a new chat if settings change or an edit checkpoint is unavailable; commands are never automatically replayed.
-- **Execution Safety Gates**: Incomplete arguments, stream failures, and failed model responses do not execute partial calls. Interrupted execution is explicitly recorded with verified status or "unknown" and requires inspection before retrying. Finishing streamed text does not finish the task.
-- **Auditing & Logging**: Worker logs contain only usage metadata: cumulative input/cached/output/reasoning tokens for main and checkpoint calls, and separate memory-call usage. They do not log request bodies or API keys.
+- **Configuration & Migration**: Configure an HTTPS API root (for example `https://api.openai.com/v1`) or a complete `/responses` address, model, and key. Legacy `/chat/completions` URLs are blocked and must be changed to the root URL. Changing the address requires providing the API key again.
 
 <a id="development"></a>
 

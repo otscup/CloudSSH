@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.6.9] - 2026-10-16
+
+### Changed
+
+- **文档冗余表述精简与中英文同步**：
+  - **环境变量配置说明精简**：移除 `README.md` 与 `README_en.md` 环境变量章节中关于内部底层机制的冗余说明（凭据存储边界、终端输出积压保护、SFTP 目录删除预算、wrangler 部署变量覆盖规则），保留核心的 Secret 加密存储建议与预留变量说明，突出关键配置项；
+  - **单管理员密码登录指引优化**：移除生成哈希步骤中关于本地 Node 脚本（`pnpm run hash-password`）的括号补充说明，突出开箱即用的浏览器内免工具生成流程；
+  - **访问策略说明精简**：移除用户白名单配置后关于存量 SSH 连接状态的冗余说明；
+  - **AI 助手 Responses API 说明优化**：移除 Responses API 说明中关于内部协议实现细节的冗余列表项（能力要求、数据留存与隐私保护、预算与检查点、编辑分支、执行安全防线、审计与日志等），精简配置与升级指引中的地址变更密钥提示，提升文档可读性与聚焦度。
+
 ## [2.6.8] - 2026-10-15
 
 ### Added
