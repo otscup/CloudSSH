@@ -22,6 +22,7 @@ const SSH_EVENT_KEYS: Record<string, TranslationKey> = {
   auth_protocol_error: 'terminal.status.authProtocolError',
   auth_success: 'terminal.status.authSuccess',
   auth_failed: 'terminal.status.authFailed',
+  auth_none_rejected: 'terminal.status.authNoneRejected',
   shell_ready: 'terminal.status.shellReady',
   session_ended: 'terminal.status.sessionEnded',
   remote_closed: 'terminal.status.remoteClosed',

@@ -47,9 +47,10 @@ describe('SSHAuth', () => {
 
       const request = SSHAuth.buildPasswordAuthRequest(username, password);
 
-      // Should still be valid - empty password is allowed in SSH
-      expect(request[0]).toBe(50);
-      expect(request.length).toBeGreaterThan(0);
+      expect(request).toEqual(concat(
+        new Uint8Array([50]), encodeString(username), encodeString('ssh-connection'),
+        encodeString('password'), new Uint8Array([0]), encodeString('')
+      ));
     });
 
     it('should handle special characters in credentials', () => {

@@ -300,10 +300,22 @@ export class SSHSessionDO {
         }
       }
 
-      if (!config.host || !config.username || (!config.password && !config.privateKey)) {
+      // An explicit empty password is valid; missing/non-string credentials are not.
+      const hasCredentials =
+        config.authMethod === 'none' ||
+        (config.authMethod === 'publickey'
+          ? typeof config.privateKey === 'string' && config.privateKey.length > 0
+          : (config.authMethod === undefined || config.authMethod === 'password') &&
+            typeof config.password === 'string');
+      if (!config.host || !config.username || !hasCredentials) {
         ws.send(JSON.stringify({ type: 'error', message: 'Missing credentials' }));
         ws.close(1011, 'Invalid credentials');
         return;
+      }
+
+      if (config.authMethod === 'none') {
+        config.password = '';
+        delete config.privateKey;
       }
 
       const pendingSessionName = this.pendingSessionNames.get(ws);

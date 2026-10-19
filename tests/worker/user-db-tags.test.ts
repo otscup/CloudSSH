@@ -166,8 +166,8 @@ describe('UserDB server tags', () => {
     expect(sql.statements.some(({ query }) => query.startsWith('UPDATE servers SET'))).toBe(false);
   });
 
-  it('认证方式不变时允许保留原凭据', async () => {
-    const sql = new FakeSql();
+  it.each(['password', 'publickey'])('认证方式 %s 不变时省略 credential 保留原凭据', async (auth_method) => {
+    const sql = new FakeSql({ auth_method });
     const database = createUserDB(sql);
 
     const response = await database.fetch(
@@ -177,7 +177,7 @@ describe('UserDB server tags', () => {
         body: JSON.stringify({
           user_id: 7,
           name: 'Production SSH',
-          auth_method: 'publickey',
+          auth_method,
         }),
       })
     );
@@ -188,6 +188,107 @@ describe('UserDB server tags', () => {
         query.startsWith('UPDATE servers SET name = ?, auth_method = ?')
       )
     ).toBe(true);
+  });
+
+  it.each([undefined, '', 'discard-this-secret'])('新增 none 服务器不保存凭据（%s）', async (credential) => {
+    const sql = new FakeSql({ auth_method: 'none' });
+    const database = createUserDB(sql);
+    const encrypt = vi.spyOn(database as any, 'encryptCredential');
+    const response = await database.fetch(new Request('http://internal/internal/servers', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: 7, name: 'None', host: 'ssh.example.com', port: 22,
+        username: 'access-token-user', auth_method: 'none', credential, region: 'weur' }),
+    }));
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({ auth_method: 'none' });
+    const insert = sql.statements.find(({ query }) => query.startsWith('INSERT INTO servers'))!;
+    expect(insert.values[5]).toBe('');
+    expect(insert.values[6]).toBe('none');
+    expect(encrypt).not.toHaveBeenCalled();
+  });
+
+  it.each(['password', 'publickey', 'none'])('切换/保持 none 时清空旧凭据（原方式 %s）', async (auth_method) => {
+    const sql = new FakeSql({ auth_method });
+    const database = createUserDB(sql);
+    const encrypt = vi.spyOn(database as any, 'encryptCredential');
+    const response = await database.fetch(new Request('http://internal/internal/servers/1', {
+      method: 'PUT',
+      body: JSON.stringify({ user_id: 7, auth_method: 'none', credential: 'discard-this-secret' }),
+    }));
+    expect(response.status).toBe(200);
+    const update = sql.statements.find(({ query }) => query.startsWith('UPDATE servers SET'))!;
+    expect(update.query).toContain('credential = ?, auth_method = ?');
+    expect(update.values.slice(0, 2)).toEqual(['', 'none']);
+    expect(encrypt).not.toHaveBeenCalled();
+  });
+
+  it.each(['password', 'publickey'])('none 切回 %s 必须显式提供对应凭据', async (auth_method) => {
+    const sql = new FakeSql({ auth_method: 'none' });
+    const database = createUserDB(sql);
+    const encrypt = vi.spyOn(database as any, 'encryptCredential').mockResolvedValue('encrypted-fresh');
+    for (const credential of auth_method === 'password' ? [undefined] : [undefined, '']) {
+      const rejected = await database.fetch(new Request('http://internal/internal/servers/1', {
+        method: 'PUT', body: JSON.stringify({ user_id: 7, auth_method, credential }),
+      }));
+      expect(rejected.status).toBe(400);
+    }
+    expect(sql.statements.some(({ query }) => query.startsWith('UPDATE servers SET'))).toBe(false);
+    const accepted = await database.fetch(new Request('http://internal/internal/servers/1', {
+      method: 'PUT', body: JSON.stringify({ user_id: 7, auth_method, credential: 'fresh-secret' }),
+    }));
+    expect(accepted.status).toBe(200);
+    expect(encrypt).toHaveBeenCalledWith('fresh-secret', 7);
+    const update = sql.statements.find(({ query }) => query.startsWith('UPDATE servers SET'))!;
+    expect(update.values.slice(0, 2)).toEqual(['encrypted-fresh', auth_method]);
+  });
+
+  it.each(['password', 'publickey'])('新增 %s 拒绝缺失/非法凭据，私钥仍不可为空', async (auth_method) => {
+    const sql = new FakeSql();
+    const database = createUserDB(sql);
+    for (const credential of auth_method === 'password' ? [undefined, null, false, 123] : [undefined, '']) {
+      const response = await database.fetch(new Request('http://internal/internal/servers', {
+        method: 'POST', body: JSON.stringify({ user_id: 7, auth_method, credential }),
+      }));
+      expect(response.status).toBe(400);
+    }
+    expect(sql.statements.some(({ query }) => query.startsWith('INSERT INTO servers'))).toBe(false);
+  });
+
+  it('新增 password 服务器允许空密码并加密保存', async () => {
+    const sql = new FakeSql({ auth_method: 'password' });
+    const database = createUserDB(sql);
+    const encrypt = vi.spyOn(database as any, 'encryptCredential').mockResolvedValue('encrypted-empty');
+    const response = await database.fetch(new Request('http://internal/internal/servers', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: 7, name: 'Empty password', host: 'ssh.example.com',
+        port: 22, username: 'alice', auth_method: 'password', credential: '', region: 'weur' }),
+    }));
+    expect(response.status).toBe(201);
+    expect(encrypt).toHaveBeenCalledWith('', 7);
+    const insert = sql.statements.find(({ query }) => query.startsWith('INSERT INTO servers'))!;
+    expect(insert.values.slice(5, 7)).toEqual(['encrypted-empty', 'password']);
+  });
+
+  it.each(['none', 'publickey', 'password'])('从 %s 显式设置空密码不会保留旧凭据', async (auth_method) => {
+    const sql = new FakeSql({ auth_method });
+    const database = createUserDB(sql);
+    const encrypt = vi.spyOn(database as any, 'encryptCredential').mockResolvedValue('encrypted-empty');
+    const response = await database.fetch(new Request('http://internal/internal/servers/1', {
+      method: 'PUT', body: JSON.stringify({ user_id: 7, auth_method: 'password', credential: '' }),
+    }));
+    expect(response.status).toBe(200);
+    expect(encrypt).toHaveBeenCalledWith('', 7);
+    const update = sql.statements.find(({ query }) => query.startsWith('UPDATE servers SET'))!;
+    expect(update.values.slice(0, 2)).toEqual(['encrypted-empty', 'password']);
+  });
+
+  it('空密码 AES-GCM 加密/解密往返不丢失零长度内容', async () => {
+    const database = createUserDB(new FakeSql());
+    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+    vi.spyOn(database as any, 'deriveEncryptionKey').mockResolvedValue(key);
+    const encrypted = await (database as any).encryptCredential('', 7);
+    expect(atob(encrypted).length).toBe(28); // 12-byte IV + 16-byte GCM tag
+    await expect((database as any).decryptCredential(encrypted, 7)).resolves.toBe('');
   });
 
   it('手动指定区域时保存服务器不会查询 IPinfo', async () => {

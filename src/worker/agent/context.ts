@@ -1,6 +1,6 @@
 import { ResponsesError } from './responses-client';
 import { boundedText, boundedToolOutput, bytes, MAX_CONTEXT_BYTES, MAX_EVIDENCE_BYTES,
-  MAX_RETAINED_BYTES, MAX_TOOL_RESULT_BYTES } from './context-limits';
+  MAX_RETAINED_BYTES, MAX_TOOL_RESULT_BYTES, boundedUtf8 } from './context-limits';
 import type { ModelResponse, ResponseFunctionCall, ResponseInput, TaskRecord } from './types';
 
 export { boundedText } from './context-limits';
@@ -16,6 +16,8 @@ interface TurnCheckpoint {
   records: TaskRecord[];
   summary: string;
   estimatedTokens: number;
+  requests: string[];
+  safety: string;
 }
 
 export class AgentContext {
@@ -31,12 +33,17 @@ export class AgentContext {
   private memory = '';
   private openCalls = new Map<string, ResponseFunctionCall>();
   private estimatedTokens = 0;
+  private requests: string[] = [];
+  private safety = '';
 
   get earliestEditableTurn(): number { return this.turns.keys().next().value ?? this.nextTurn; }
   get canCheckpoint(): boolean { return this.history.length > 0 && this.openCalls.size === 0; }
 
   beginTurn(message: string, userIndex?: number): void {
     if (this.openCalls.size) throw new ResponsesError('responses_invalid');
+    const requests = userIndex == null ? this.requests : this.turns.get(userIndex)?.requests ?? [];
+    // Preserve exact user constraints through compaction, with a bounded lifetime allocation.
+    if (bytes([...requests, message]) > MAX_EVIDENCE_BYTES) throw new ResponsesError('responses_budget');
     if (userIndex != null) {
       if (!Number.isSafeInteger(userIndex) || userIndex < 0) throw new ResponsesError('responses_history');
       const point = this.turns.get(userIndex);
@@ -47,6 +54,8 @@ export class AgentContext {
           this.summary = '';
           this.estimatedTokens = 0;
           this.records = [];
+          this.requests = [];
+          this.safety = '';
           this.nextTurn = 0;
         } else {
           throw new ResponsesError('responses_history');
@@ -57,6 +66,8 @@ export class AgentContext {
         this.summary = point.summary;
         this.estimatedTokens = point.estimatedTokens;
         this.records = [...point.records];
+        this.requests = [...point.requests];
+        this.safety = point.safety;
         for (const index of this.turns.keys()) if (index >= userIndex) this.turns.delete(index);
         this.nextTurn = userIndex;
         this.terminal = '';
@@ -68,9 +79,13 @@ export class AgentContext {
       this.pending = this.pending.filter(item => 'type' in item && item.type === 'function_call_output');
     }
     this.turns.set(this.nextTurn++, { history: [...this.history], pending: [...this.pending],
-      records: [...this.records], summary: this.summary, estimatedTokens: this.estimatedTokens });
+      records: [...this.records], summary: this.summary, estimatedTokens: this.estimatedTokens,
+      requests: [...this.requests], safety: this.safety });
     this.currentGoal = message;
-    this.pending.push({ role: 'user', content: message });
+    this.requests.push(message);
+    // A failed first request after compaction never accepted its pending checkpoint. Rebuild it.
+    if (!this.history.length && this.summary) this.pending = this.checkpointSegment(this.summary, this.safety);
+    else this.pending.push({ role: 'user', content: message });
     this.record({ role: 'user', content: message });
     this.pruneTurns();
   }
@@ -129,30 +144,49 @@ export class AgentContext {
   }
 
   needsCheckpoint(budget: number, prefix: string): boolean {
+    // A prepared but not-yet-accepted segment cannot be compacted again. It may use the
+    // reserved headroom while retrying its first main request, but must still fit the hard budget.
+    if (!this.history.length && this.summary) return !this.fitsBudget(budget, prefix);
     // UTF-8 bytes are a deliberately conservative fallback; usage only raises the estimate.
     return Math.max(bytes(this.buildInput()) + bytes(prefix),
       this.estimatedTokens + bytes(this.pending)) + 4096 >= budget * 0.75 ||
       bytes(this.records) >= MAX_EVIDENCE_BYTES * 0.9;
   }
 
-  fitsBudget(budget: number, prefix: string): boolean {
-    return bytes(this.buildInput()) <= MAX_CONTEXT_BYTES &&
-      bytes(this.buildInput()) + bytes(prefix) + 4096 < budget;
+  fitsBudget(budget: number, prefix: string, input = this.buildInput()): boolean {
+    return bytes(input) <= MAX_CONTEXT_BYTES && bytes(input) + bytes(prefix) + 4096 < budget;
   }
 
-  checkpointInput(): string {
+  checkpointInput(limitBytes = 48 * 1024, operations: Record<string, unknown> = {}, concise = false): string {
     if (!this.canCheckpoint) throw new ResponsesError('responses_budget');
-    return boundedText(JSON.stringify({ previousCheckpoint: this.summary, goal: this.currentGoal,
-      records: this.records }), 96_000);
+    const evidence = { previousCheckpoint: this.summary, goal: this.currentGoal,
+      requests: this.requests, operations, records: [] as TaskRecord[] };
+    if (bytes(evidence) > limitBytes) throw new ResponsesError('responses_budget');
+    // Serialize whole fields/records only. Never head/tail-cut the JSON or authoritative statuses.
+    for (const record of this.records.slice(-(concise ? 8 : 32)).reverse()) {
+      const view = { ...record, content: boundedUtf8(record.content, concise ? 192 : 768),
+        ...(record.calls ? { calls: record.calls.map(call => ({ ...call,
+          arguments: boundedUtf8(call.arguments, concise ? 128 : 512) })) } : {}) };
+      evidence.records.unshift(view);
+      if (bytes(evidence) > limitBytes) evidence.records.shift();
+    }
+    return JSON.stringify(evidence);
   }
 
-  replaceWithCheckpoint(summary: string): void {
+  checkpointSegment(summary: string, safety = ''): ResponseInput[] {
+    return [observation('context checkpoint', summary),
+      ...(this.requests.length > 1 ? [observation('preserved user requests', JSON.stringify(this.requests))] : []),
+      ...(safety ? [observation('execution facts', safety)] : []),
+      { role: 'user', content: this.currentGoal }];
+  }
+
+  replaceWithCheckpoint(summary: string, safety = ''): void {
     if (!this.canCheckpoint) throw new ResponsesError('responses_budget');
-    const next = [observation('context checkpoint', summary),
-      { role: 'user' as const, content: this.currentGoal }];
+    const next = this.checkpointSegment(summary, safety);
     if (bytes(next) > MAX_CONTEXT_BYTES) throw new ResponsesError('responses_budget');
     // A deliberate fresh continuation segment, never a partial rewrite of an active tool chain.
     this.summary = summary;
+    this.safety = safety;
     this.estimatedTokens = 0;
     this.history = [];
     this.pending = next;
@@ -165,12 +199,14 @@ export class AgentContext {
   retainedBytes(): number {
     // Snapshots share immutable items. Count each item once, plus array/branch metadata.
     const items = new Set<unknown>([...this.history, ...this.pending, ...this.records]);
-    const summaries = new Set([this.summary]);
+    const summaries = new Set([this.summary, this.safety, ...this.requests]);
     let metadata = 0;
     for (const point of this.turns.values()) {
       for (const item of [...point.history, ...point.pending, ...point.records]) items.add(item);
       summaries.add(point.summary);
-      metadata += 128 + (point.history.length + point.pending.length + point.records.length) * 8;
+      summaries.add(point.safety);
+      for (const request of point.requests) summaries.add(request);
+      metadata += 128 + (point.history.length + point.pending.length + point.records.length + point.requests.length) * 8;
     }
     return metadata + [...items].reduce<number>((total, item) => total + bytes(item), 0) +
       [...summaries].reduce((total, value) => total + bytes(value), 0);

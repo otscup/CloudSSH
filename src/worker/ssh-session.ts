@@ -1638,6 +1638,8 @@ export class SSHSession {
   }
 
   private canUseAuthMethod(method: ActiveAuthMethod): boolean {
+    // Explicit none mode must never send credentials or start interactive auth.
+    if (this.config.authMethod === 'none') return method === 'none';
     switch (method) {
       case 'none':
         return true;
@@ -1647,7 +1649,7 @@ export class SSHSession {
           Boolean(this.config.privateKey && this.sessionID)
         );
       case 'password':
-        return this.config.authMethod !== 'publickey' && Boolean(this.config.password);
+        return this.config.authMethod !== 'publickey' && typeof this.config.password === 'string';
       case 'keyboard-interactive':
         // 分享会话不能把所有者保存的密码交由接收者决定如何响应远端挑战。
         return this.allowKeyboardInteractive && this.config.sessionPolicy?.source !== 'share';
@@ -1808,6 +1810,15 @@ export class SSHSession {
           this.failAuthentication(
             '服务器发送了无效的认证失败响应',
             'auth_interactive_protocol_error'
+          );
+          break;
+        }
+
+        if (this.config.authMethod === 'none') {
+          this.failAuthentication(
+            '服务器拒绝无认证（none）登录，请选择服务器支持的认证方式',
+            'auth_none_rejected',
+            true
           );
           break;
         }

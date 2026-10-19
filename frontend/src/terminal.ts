@@ -35,6 +35,7 @@ import { confirmAction, notify } from './ui-feedback';
 const TRZSZ_MAX_DATA_CHUNK_SIZE = 2 * 1024 * 1024;
 const NON_RETRIABLE_AUTH_EVENTS = new Set([
   'auth_failed',
+  'auth_none_rejected',
   'auth_interactive_protocol_error',
   'auth_interactive_limit',
   'auth_interactive_client_unavailable',
@@ -65,7 +66,7 @@ export interface SSHConnectionConfig {
   port: number;
   username: string;
   password?: string;
-  authMethod?: 'password' | 'publickey';
+  authMethod?: 'password' | 'publickey' | 'none';
   privateKey?: string;
   expectedFingerprint?: string;
   /** 匿名路径手动覆盖的区域偏好（保存服务器路径不使用此字段） */

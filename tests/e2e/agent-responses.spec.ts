@@ -73,6 +73,131 @@ for (const [locale, expected] of [['zh-CN', '模型响应未完成'], ['zh-TW', 
   });
 }
 
+test('safe request diagnostics are visible without exposing provider bodies or arbitrary fields', async ({ page }) => {
+  await mount(page, 'en-US');
+  await page.evaluate(() => {
+    const { panel, sent } = (window as any).__responsesAgent;
+    panel.sendMessage('Inspect');
+    const requestId = sent.at(-1).requestId;
+    panel.handleAgentFrame({ subType: 'error', runId: 1, requestId, code: 'responses_http', status: 400,
+      message: 'SECRET_PROVIDER_BODY', diagnostics: { purpose: 'checkpoint', stage: 'http',
+        parameter: 'text.format', providerCode: 'unsupported_parameter',
+        requestId: '12345678-1234-4123-8123-123456789abc', message: '<img src=x onerror="SECRET">',
+        api_key: 'SECRET_KEY', upstreamRequestId: 'SECRET_HEADER' } });
+    panel.handleAgentFrame({ subType: 'run_end', runId: 1, requestId, outcome: 'failed' });
+  });
+  const messages = page.locator('#agent-messages');
+  await expect(messages).toContainText('Context checkpoint');
+  await expect(messages).toContainText('text.format');
+  await expect(messages).toContainText('unsupported_parameter');
+  await expect(messages).toContainText('12345678-1234-4123-8123-123456789abc');
+  await expect(messages).not.toContainText('SECRET');
+  await expect(messages.locator('img, script')).toHaveCount(0);
+});
+
+test('an auxiliary memory failure warns without removing the active task stream', async ({ page }) => {
+  await mount(page, 'en-US');
+  await page.evaluate(() => {
+    const { panel, sent } = (window as any).__responsesAgent;
+    panel.sendMessage('New task');
+    const requestId = sent.at(-1).requestId;
+    panel.handleAgentFrame({ subType: 'stream_chunk', requestId, content: 'ACTIVE_STREAM' });
+    panel.handleAgentFrame({ subType: 'memory_status', requestId, code: 'memory_failed',
+      errorCode: 'responses_http', status: 500, diagnostics: { purpose: 'memory', stage: 'http',
+        providerCode: 'server_error' } });
+  });
+  await expect(page.locator('.app-toast')).toContainText('Memory extraction failed');
+  await expect(page.locator('#agent-send-btn')).toHaveClass(/is-stopping/);
+  await expect(page.locator('#agent-messages')).toContainText('ACTIVE_STREAM');
+});
+
+for (const [locale, recovery, fallback, paused] of [
+  ['zh-CN', '正在缩小输入', '本地执行事实', '安全暂停'],
+  ['zh-TW', '正在縮小輸入', '本機執行事實', '安全暫停'],
+  ['en-US', 'Regenerating once', 'local execution facts', 'safely paused'],
+]) {
+  test(`checkpoint recovery, fallback and pause diagnostics are localized (${locale})`, async ({ page }) => {
+    await mount(page, locale);
+    await page.evaluate(() => {
+      const { panel, sent } = (window as any).__responsesAgent;
+      panel.sendMessage('Inspect');
+      const requestId = sent.at(-1).requestId;
+      panel.handleAgentFrame({ subType: 'stream_chunk', requestId, content: 'ACTIVE_CHECKPOINT_STREAM' });
+      panel.handleAgentFrame({ subType: 'context_status', requestId: 'stale', compacted: true, checkpointSource: 'local' });
+    });
+    await expect(page.locator('.app-toast')).toHaveCount(0);
+    await page.evaluate(() => {
+      const { panel, sent } = (window as any).__responsesAgent;
+      panel.handleAgentFrame({ subType: 'context_status', requestId: sent.at(-1).requestId, recovering: true });
+    });
+    await expect(page.locator('.app-toast').filter({ hasText: recovery })).toBeVisible();
+    await page.evaluate(() => {
+      const { panel, sent } = (window as any).__responsesAgent;
+      panel.handleAgentFrame({ subType: 'context_status', requestId: sent.at(-1).requestId, compacted: true, checkpointSource: 'local' });
+    });
+    await expect(page.locator('.app-toast').filter({ hasText: fallback })).toBeVisible();
+    await expect(page.locator('#agent-send-btn')).toHaveClass(/is-stopping/);
+    await expect(page.locator('#agent-messages')).toContainText('ACTIVE_CHECKPOINT_STREAM');
+    await page.evaluate(() => {
+      const { panel, sent } = (window as any).__responsesAgent;
+      const requestId = sent.at(-1).requestId;
+      panel.handleAgentFrame({ subType: 'error', requestId, runId: 1, code: 'responses_incomplete',
+        message: 'SECRET_PROVIDER_BODY', diagnostics: { purpose: 'checkpoint', stage: 'parse',
+          incompleteReason: 'max_output_tokens', requestedOutputTokens: 8192, outputTokens: 8000,
+          reasoningTokens: 7900, requestId: '12345678-1234-4123-8123-123456789abc', rawReason: 'SECRET' } });
+      panel.handleAgentFrame({ subType: 'run_end', requestId, runId: 1, outcome: 'failed' });
+    });
+    const messages = page.locator('#agent-messages');
+    await expect(messages).toContainText(paused);
+    for (const value of ['8192', '8000', '7900', '12345678-1234-4123-8123-123456789abc']) await expect(messages).toContainText(value);
+    await expect(messages).not.toContainText('SECRET');
+    await expect(page.locator('#agent-send-btn')).not.toHaveClass(/is-stopping/);
+  });
+}
+
+test('model token budgets load, validate, save and reset without resending the saved API key', async ({ page }) => {
+  await mockAnonymousSession(page);
+  const writes: any[] = [];
+  let config = { configured: true, base_url: 'https://api.example.com/v1', model: 'model-test',
+    api_key_last4: 'last', context_window: 16_384, max_output_tokens: 1024 };
+  await page.route('**/api/ai/config', route => {
+    if (route.request().method() === 'GET') return route.fulfill({ json: config });
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const body = route.request().postDataJSON();
+    writes.push(body);
+    config = { ...config, ...body, context_window: body.context_window ?? 64_000,
+      max_output_tokens: body.max_output_tokens ?? 8192 };
+    return route.fulfill({ json: { success: true } });
+  });
+  await page.goto('/?lang=en-US');
+  await page.evaluate(async () => {
+    const module = await (window as any).eval("import('/src/ai-config.ts')");
+    (window as any).__aiBudgetPanel = new module.AIConfigPanel();
+    (window as any).__aiBudgetPanel.show();
+  });
+  await page.locator('[data-i18n="aiConfig.budgets"]').click();
+  await expect(page.locator('#ai-context-window')).toHaveValue('16384');
+  await expect(page.locator('#ai-max-output-tokens')).toHaveValue('1024');
+  await page.locator('#ai-max-output-tokens').fill('16384');
+  await page.locator('#ai-save-btn').click();
+  await expect(page.locator('#ai-config-error')).toContainText('Invalid token budgets');
+  expect(writes).toHaveLength(0);
+  await page.locator('#ai-context-window').fill('32768');
+  await page.locator('#ai-max-output-tokens').fill('2048');
+  await page.locator('#ai-save-btn').click();
+  await expect.poll(() => writes.length).toBe(1);
+  expect(writes[0]).toMatchObject({ context_window: 32_768, max_output_tokens: 2048 });
+  expect(writes[0]).not.toHaveProperty('api_key');
+  await expect(page.locator('#ai-config-modal')).toBeHidden();
+  await page.evaluate(() => (window as any).__aiBudgetPanel.show());
+  await expect(page.locator('#ai-context-window')).toHaveValue('32768');
+  await page.locator('#ai-context-window').fill('');
+  await page.locator('#ai-max-output-tokens').fill('');
+  await page.locator('#ai-save-btn').click();
+  await expect.poll(() => writes.length).toBe(2);
+  expect(writes[1]).toMatchObject({ context_window: null, max_output_tokens: null });
+});
+
 test('confirmation buttons and closure frames bind to one ID, even for identical commands', async ({ page }) => {
   await mount(page);
   await page.evaluate(() => {

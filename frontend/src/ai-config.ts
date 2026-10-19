@@ -1,6 +1,7 @@
 // AI Config panel — BYOK settings for LLM API
 
 import { normalizeAIBaseUrl } from '../../src/ai-endpoint';
+import { resolveAIModelBudgets } from '../../src/ai-model-policy';
 import { responseErrorMessage } from './agent/response-errors';
 import { t, translateDocument } from './i18n';
 
@@ -115,6 +116,20 @@ export class AIConfigPanel {
             <div id="ai-fetch-status" class="text-[10px] mt-1 hidden"></div>
             <div class="text-[10px] text-muted mt-1" data-i18n="aiConfig.modelDiscoveryHint">${t('aiConfig.modelDiscoveryHint')}</div>
           </div>
+          <details class="text-xs text-muted">
+            <summary class="cursor-pointer" data-i18n="aiConfig.budgets"></summary>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
+              <div>
+                <label for="ai-context-window" class="block mb-2" data-i18n="aiConfig.contextWindow"></label>
+                <input id="ai-context-window" type="number" min="8192" max="1000000" step="1" placeholder="64000" class="terminal-input text-[13px]" aria-describedby="ai-budget-hint">
+              </div>
+              <div>
+                <label for="ai-max-output-tokens" class="block mb-2" data-i18n="aiConfig.maxOutputTokens"></label>
+                <input id="ai-max-output-tokens" type="number" min="256" max="128000" step="1" placeholder="8192" class="terminal-input text-[13px]" aria-describedby="ai-budget-hint">
+              </div>
+            </div>
+            <p id="ai-budget-hint" class="text-[10px] mt-2" data-i18n="aiConfig.budgetHint"></p>
+          </details>
           <div class="pt-2 space-y-2">
             <div id="ai-config-error" class="text-[var(--error)] text-[11px] hidden"></div>
             <div id="ai-config-success" class="text-[var(--accent)] text-[11px] hidden"></div>
@@ -384,6 +399,10 @@ export class AIConfigPanel {
           const hintEl = this.modalEl?.querySelector('#ai-key-hint');
           if (baseUrlEl) baseUrlEl.value = data.base_url || '';
           if (modelEl) modelEl.value = data.model || '';
+          const contextEl = this.modalEl?.querySelector('#ai-context-window') as HTMLInputElement;
+          const outputEl = this.modalEl?.querySelector('#ai-max-output-tokens') as HTMLInputElement;
+          if (contextEl) contextEl.value = data.context_window == null ? '' : String(data.context_window);
+          if (outputEl) outputEl.value = data.max_output_tokens == null ? '' : String(data.max_output_tokens);
           this.savedBaseUrl = data.base_url || '';
           this.hasConfiguredKey = Boolean(data.api_key_last4);
           if (hintEl && data.api_key_last4) {
@@ -528,10 +547,23 @@ export class AIConfigPanel {
       return;
     }
 
+    const contextEl = this.modalEl?.querySelector('#ai-context-window') as HTMLInputElement;
+    const outputEl = this.modalEl?.querySelector('#ai-max-output-tokens') as HTMLInputElement;
+    const budgets = {
+      context_window: contextEl.value === '' ? null : contextEl.valueAsNumber,
+      max_output_tokens: outputEl.value === '' ? null : outputEl.valueAsNumber,
+    };
+    try { resolveAIModelBudgets(budgets); }
+    catch {
+      if (errorEl) { errorEl.textContent = responseErrorMessage('responses_limits'); errorEl.classList.remove('hidden'); }
+      return;
+    }
     try {
-      const body: { base_url: string; model: string; api_key?: string } = {
+      const body: { base_url: string; model: string; api_key?: string;
+        context_window: number | null; max_output_tokens: number | null } = {
         base_url: baseUrl,
         model,
+        ...budgets,
       };
       if (apiKey) body.api_key = apiKey;
 

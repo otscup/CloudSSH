@@ -46,6 +46,101 @@ test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
 
+test('匿名 password 空密码可连接、重连并从历史恢复', async ({ page }) => {
+  const configs: Array<Record<string, unknown>> = [];
+  const disconnect: Array<() => void> = [];
+  await page.route('**/api/known-hosts?**', (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
+  });
+  await page.routeWebSocket('**/api/ssh*', (socket) => {
+    disconnect.push(() => socket.close({ code: 1011 }));
+    socket.onMessage((data) => {
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data);
+      if (message.host) {
+        configs.push(message);
+        socket.send(JSON.stringify({ type: 'status', event: 'auth_success', message: '' }));
+        socket.send(JSON.stringify({ type: 'status', event: 'shell_ready', message: '' }));
+      } else if (message.type === 'ping') {
+        socket.send(JSON.stringify({ type: 'pong', id: message.id }));
+      }
+    });
+  });
+  await page.goto('/?lang=zh-CN');
+  await page.locator('#host').fill('ssh.example.com');
+  await page.locator('#username').fill('alice');
+  await page.locator('#auth-tab-key').click();
+  await page.locator('#private-key').fill('must-not-send-key');
+  await page.locator('#auth-tab-password').click();
+  await expect(page.locator('#password')).toHaveValue('');
+  await page.locator('#connect-btn').click();
+  await expect(page.locator('#term-status')).toContainText('已连接');
+  expect(configs[0]).toMatchObject({ authMethod: 'password', password: '' });
+  expect(configs[0]).not.toHaveProperty('privateKey');
+  disconnect[0]();
+  await expect.poll(() => configs.length, { timeout: 10_000 }).toBe(2);
+  expect(configs[1]).toMatchObject({ authMethod: 'password', password: '' });
+  await page.reload();
+  await expect(page.locator('#auth-tab-password')).toHaveClass(/auth-tab-active/);
+  await expect(page.locator('#username')).toHaveValue('alice');
+  await expect(page.locator('#password')).toHaveValue('');
+});
+
+test('空密码连接可进入交互认证，单个空响应及零提示轮次均可直接回车', async ({ page }) => {
+  const configs: Array<Record<string, unknown>> = [];
+  const acks: string[] = [];
+  const responses: Array<{ id: string; responses: string[] }> = [];
+  await page.route('**/api/known-hosts?**', (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    return route.fulfill({ status: 401, json: { error: 'unauthorized' } });
+  });
+  await page.routeWebSocket('**/api/ssh*', (socket) => {
+    const challenge = (id: string, prompts: Array<{ text: string; echo: boolean }>) =>
+      socket.send(JSON.stringify({ type: 'auth_challenge', id, name: 'Interactive',
+        instruction: '', prompts, canUseStoredPassword: false }));
+    socket.onMessage((data) => {
+      if (typeof data !== 'string') return;
+      const message = JSON.parse(data);
+      if (message.host) {
+        configs.push(message);
+        challenge('empty-response', [{ text: 'Password:', echo: false }]);
+      } else if (message.type === 'auth_challenge_ack') {
+        acks.push(message.id);
+      } else if (message.type === 'auth_response') {
+        responses.push(message);
+        if (message.id === 'empty-response') challenge('zero-prompts', []);
+        else {
+          socket.send(JSON.stringify({ type: 'status', event: 'auth_success', message: '' }));
+          socket.send(JSON.stringify({ type: 'status', event: 'shell_ready', message: '' }));
+        }
+      }
+    });
+  });
+  await page.goto('/?lang=zh-CN');
+  await page.locator('#host').fill('ssh.example.com');
+  await page.locator('#username').fill('alice');
+  await page.locator('#connect-btn').click();
+  const input = page.locator('.auth-challenge-dialog__input');
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue('');
+  await expect(page.locator('.auth-challenge-dialog__button--stored')).toHaveCount(0);
+  expect(configs[0]).toMatchObject({ authMethod: 'password', password: '' });
+  expect(responses).toHaveLength(0);
+  await input.press('Enter');
+  await expect.poll(() => responses.length).toBe(1);
+  expect(responses[0]).toMatchObject({ id: 'empty-response', responses: [''] });
+  await expect(input).toHaveCount(0);
+  const submit = page.locator('.auth-challenge-dialog__button--submit');
+  await expect(submit).toBeFocused();
+  await submit.press('Enter');
+  await expect.poll(() => responses.length).toBe(2);
+  expect(responses[1]).toMatchObject({ id: 'zero-prompts', responses: [] });
+  expect(acks).toEqual(['empty-response', 'zero-prompts']);
+  await expect(page.locator('.auth-challenge-dialog')).toHaveCount(0);
+  await expect(page.locator('#term-status')).toContainText('已连接');
+});
+
 test('renders a Serv00 password challenge and acknowledges it only after display', async ({
   page,
 }) => {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { SSHConnectionConfig } from '../../src/types';
 import { UserDBDO } from '../../src/worker/user-db';
 
 class JumpSql {
@@ -88,7 +89,7 @@ describe('UserDB jump chain validation', () => {
 });
 
 describe('UserDB jump connection resolution', () => {
-  it('生成从公网入口到最终目标的不可变连接链，并采用入口区域', async () => {
+  it.each([false, true])('生成不可变连接链，保留 none 目标/跳板认证及分享策略（none=%s）', async (useNone) => {
     const servers = new Map<number, Record<string, unknown>>([
       [
         1,
@@ -100,7 +101,7 @@ describe('UserDB jump connection resolution', () => {
           port: 22,
           username: 'c',
           credential: 'cred-c',
-          auth_method: 'password',
+          auth_method: useNone ? 'none' : 'password',
           region: 'weur',
           inferred_hint: null,
           os: null,
@@ -116,7 +117,7 @@ describe('UserDB jump connection resolution', () => {
           host: '10.0.0.2',
           port: 22,
           username: 'a',
-          credential: 'cred-a',
+          credential: useNone ? '' : 'cred-a',
           auth_method: 'password',
           region: null,
           inferred_hint: null,
@@ -134,7 +135,7 @@ describe('UserDB jump connection resolution', () => {
           port: 22,
           username: 'b',
           credential: 'cred-b',
-          auth_method: 'publickey',
+          auth_method: useNone ? 'none' : 'publickey',
           region: 'apac',
           inferred_hint: null,
           os: 'linux',
@@ -160,6 +161,9 @@ describe('UserDB jump connection resolution', () => {
         if (query.includes('SELECT github_id FROM users')) {
           return { toArray: () => [{ github_id: 99 }] };
         }
+        if (query.includes('FROM ssh_shares WHERE id = ?')) {
+          return { toArray: () => [{ user_id: 7, server_id: 3, share_ref: 'share-ref', status: 'claimed' }] };
+        }
         return { toArray: () => [] };
       },
     };
@@ -167,9 +171,8 @@ describe('UserDB jump connection resolution', () => {
       { storage: { sql } } as unknown as DurableObjectState,
       {} as never
     );
-    (
-      database as unknown as { decryptCredential: (value: string) => Promise<string> }
-    ).decryptCredential = async (value) => value;
+    const decrypt = vi.spyOn(database as any, 'decryptCredential')
+      .mockImplementation(async (value: unknown) => value);
 
     const connect = await database.fetch(
       new Request('http://internal/internal/servers/3/connect', {
@@ -187,20 +190,33 @@ describe('UserDB jump connection resolution', () => {
         body: JSON.stringify({ token }),
       })
     );
-    const config = (await consumed.json()) as {
-      host: string;
-      privateKey: string;
-      locationHint: string;
-      knownHostIdentity: string;
-      jumpHosts: Array<{ name: string; knownHostIdentity: string }>;
-    };
+    const config = (await consumed.json()) as SSHConnectionConfig & { jumpHosts: NonNullable<SSHConnectionConfig['jumpHosts']> };
 
     expect(config.host).toBe('10.0.0.3');
-    expect(config.privateKey).toBe('cred-b');
+    expect(config.authMethod).toBe(useNone ? 'none' : 'publickey');
+    expect(config.privateKey).toBe(useNone ? '' : 'cred-b');
+    expect(config.password).toBe('');
+    expect(config.jumpHosts[0]).toMatchObject({ authMethod: useNone ? 'none' : 'password', password: useNone ? '' : 'cred-c', privateKey: '' });
+    expect(config.jumpHosts[1]).toMatchObject({ authMethod: 'password', password: useNone ? '' : 'cred-a' });
+    if (useNone) {
+      expect(decrypt).not.toHaveBeenCalledWith('cred-b', 7);
+      expect(decrypt).not.toHaveBeenCalledWith('cred-c', 7);
+    }
     expect(config.locationHint).toBe('weur');
     expect(config.jumpHosts.map((hop) => hop.name)).toEqual(['C', 'A']);
     expect(config.jumpHosts[0].knownHostIdentity).toBe('c.example.com');
     expect(config.jumpHosts[1].knownHostIdentity).toContain('jump:1@c.example.com:22|10.0.0.2');
     expect(config.knownHostIdentity).toContain('1@c.example.com:22>2@10.0.0.2:22|10.0.0.3');
+
+    const shared = await database.fetch(new Request('http://internal/internal/servers/3/share-config', {
+      method: 'POST', body: JSON.stringify({ user_id: 7, share_id: 'share-id', share_ref: 'share-ref', session_expires_at: Date.now() + 60_000 }),
+    }));
+    expect(shared.status).toBe(200);
+    await expect(shared.json()).resolves.toMatchObject({
+      authMethod: useNone ? 'none' : 'publickey',
+      jumpHosts: [expect.objectContaining({ authMethod: useNone ? 'none' : 'password' }), expect.objectContaining({ authMethod: 'password', password: useNone ? '' : 'cred-a' })],
+      sessionPolicy: { source: 'share', allowAgent: false, allowSftp: true,
+        allowMetadataMutation: false, allowHostKeyMutation: false, allowReconnect: false },
+    });
   });
 });

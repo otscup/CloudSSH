@@ -736,7 +736,14 @@
                 >
                   私钥
                 </button>
+                <button
+                  type="button"
+                  id="modal-auth-tab-none"
+                  class="auth-tab px-3 py-1 text-[11px] font-bold tracking-[0.1em] cursor-pointer transition-all"
+                  data-i18n="auth.none"
+                ></button>
               </div>
+              <p id="modal-none-section" class="text-xs text-muted" style="display: none" data-i18n="auth.noneHint"></p>
               <div id="modal-password-section">
                 <div class="flex items-center">
                   <span
@@ -751,7 +758,15 @@
                     type="password"
                     data-i18n-aria-label="common.password"
                     aria-label="密码"
+                    aria-describedby="server-password-hint"
                   />
+                </div>
+                <p id="server-password-hint" class="text-xs text-muted mt-2" data-i18n="auth.passwordHint"></p>
+                <div id="server-empty-password-option" class="hidden mt-2">
+                  <label class="flex items-center gap-2 text-xs text-muted cursor-pointer">
+                    <input id="server-empty-password" type="checkbox" class="accent-[var(--accent)] w-4 h-4" />
+                    <span data-i18n="server.useEmptyPassword"></span>
+                  </label>
                 </div>
               </div>
               <div id="modal-key-section" style="display: none">

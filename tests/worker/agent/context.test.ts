@@ -102,6 +102,51 @@ describe('bounded stateless Responses context and local branches', () => {
     expect(() => context.beginTurn('Old edit', 0)).toThrow();
   });
 
+  it('serializes bounded Unicode/escaped evidence as valid JSON without cutting mandatory facts', () => {
+    const context = new AgentContext();
+    context.beginTurn('原始约束：禁止修改防火墙'); accept(context, response('first'));
+    for (let i = 0; i < 64; i++) context.record({ role: 'tool', callId: `id_${i}`, content: ('界\\\"\n'.repeat(2000)) });
+    context.beginTurn('继续未完成的任务');
+    const operations = { rows: Array.from({ length: 86 }, (_, i) => [i, i === 43 ? 'unknown' : 'succeeded']) };
+    const serialized = context.checkpointInput(8192, operations);
+    expect(bytes(serialized)).toBeLessThanOrEqual(8192);
+    const parsed = JSON.parse(serialized);
+    expect(parsed.requests).toEqual(['原始约束：禁止修改防火墙', '继续未完成的任务']);
+    expect(parsed.operations).toEqual(operations);
+    expect(parsed.records.every((record: any) => typeof record.content === 'string')).toBe(true);
+    expect(() => context.checkpointInput(100, operations)).toThrow();
+  });
+
+  it('preserves an unaccepted compacted segment and safety ledger across repeated requests', () => {
+    const context = new AgentContext();
+    context.beginTurn('Original goal and constraints'); accept(context, response('first'));
+    context.replaceWithCheckpoint('Complete summary', '{"status":"unknown","operation":"already dispatched"}');
+    context.beginTurn('Continue');
+    expect(JSON.stringify(context.buildInput())).toContain('Complete summary');
+    expect(JSON.stringify(context.buildInput())).toContain('already dispatched');
+    expect(JSON.stringify(context.buildInput())).toContain('Original goal and constraints');
+    expect(JSON.stringify(context.buildInput())).toContain('Continue');
+  });
+
+  it('allows an unaccepted checkpoint to use reserved headroom instead of recompacting an empty history', () => {
+    const context = new AgentContext();
+    context.beginTurn('Original request'); accept(context, response('first'));
+    context.replaceWithCheckpoint('Prepared summary', 'x'.repeat(42_000));
+    context.beginTurn('Continue');
+    expect(context.canCheckpoint).toBe(false);
+    expect(context.fitsBudget(55_808, '')).toBe(true);
+    expect(context.needsCheckpoint(55_808, '')).toBe(false);
+    expect(context.needsCheckpoint(40_000, '')).toBe(true);
+  });
+
+  it('rejects cumulative user constraints beyond their bounded allocation without dropping earlier requests', () => {
+    const context = new AgentContext();
+    for (let i = 0; i < 6; i++) { context.beginTurn(String(i) + 'x'.repeat(16_000)); accept(context, response(`r_${i}`)); }
+    const before = context.buildInput();
+    expect(() => context.beginTurn('x'.repeat(16_000))).toThrow();
+    expect(context.buildInput()).toEqual(before);
+  });
+
   it('smoothly heals and starts turn 0 when editing from a cold start/reconnected session with empty turns', () => {
     const context = new AgentContext();
     // 模拟重连或冷启动时，前端带着从草稿恢复的 userIndex: 1 提交编辑

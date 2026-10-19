@@ -13,7 +13,7 @@ export type { ServerWorkLog, ServerKnowledgeItem, UnifiedServerMemory, Knowledge
 
 export interface ResponseFunctionCall {
   type: 'function_call';
-  id: string;
+  id?: string;
   call_id: string;
   name: string;
   arguments: string;
@@ -22,17 +22,21 @@ export interface ResponseFunctionCall {
 
 export interface ResponseMessage {
   type: 'message';
-  id: string;
+  id?: string;
+  phase?: 'commentary' | 'final_answer' | null;
   role: 'assistant';
-  status: 'completed';
+  status: 'completed' | 'incomplete' | 'in_progress';
   content: Array<{ type: 'output_text'; text: string; annotations: unknown[] }
     | { type: 'refusal'; refusal: string }>;
 }
 
 export interface ResponseReasoning {
   type: 'reasoning';
-  id: string;
+  id?: string;
   summary: Array<{ type: 'summary_text'; text: string }>;
+  encrypted_content?: string | null;
+  content?: Array<{ type: 'reasoning_text'; text: string }>;
+  status?: 'completed' | 'incomplete' | 'in_progress';
 }
 
 export type ResponseOutput = ResponseMessage | ResponseFunctionCall | ResponseReasoning;
@@ -64,7 +68,7 @@ export interface ToolDefinition {
   type: 'function';
   name: string;
   description: string;
-  strict: true;
+  strict: boolean;
   parameters: {
     type: 'object';
     properties: Record<string, ToolParameter>;
@@ -82,6 +86,8 @@ export interface ResponseUsage {
 }
 
 export interface ModelResponse {
+  /** Locally generated correlation ID, never an upstream ID or header. */
+  requestId?: string;
   id: string;
   text: string;
   calls: ResponseFunctionCall[];
@@ -108,6 +114,8 @@ export interface AIConfig {
   base_url: string;
   model: string;
   api_key: string;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
 }
 
 export type AgentStatus = 'idle' | 'running';

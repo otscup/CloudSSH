@@ -23,7 +23,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   username: string;
-  auth_method: 'password' | 'publickey';
+  auth_method: 'password' | 'publickey' | 'none';
   region?: string | null;
   inferred_hint?: string | null;
   tags: string[];
@@ -45,7 +45,7 @@ interface ServerSavePayload {
   host: string;
   port: number;
   username: string;
-  auth_method: 'password' | 'publickey';
+  auth_method: 'password' | 'publickey' | 'none';
   tags: string[];
   credential?: string;
   region?: string;
@@ -184,7 +184,7 @@ export class ServerList {
   private onConnect: (wsUrl: string, serverName: string, hostInfo?: SSHHostInfo) => void;
   private editingServerId: number | null = null;
   private editingOriginalAuthMethod: ServerConfig['auth_method'] | null = null;
-  private modalAuthMode: 'password' | 'key' = 'password';
+  private modalAuthMode: 'password' | 'key' | 'none' = 'password';
   private modalTransportMode: 'direct' | 'cf_tunnel' = 'direct';
   private clearCfAccessClientSecret = false;
   private searchQuery = '';
@@ -363,6 +363,10 @@ export class ServerList {
       void this.handleSubmit();
     });
 
+    document.getElementById('server-empty-password')?.addEventListener('change', () => {
+      this.setModalAuthMode(this.modalAuthMode);
+    });
+
     // Modal 认证方式切换
     document
       .getElementById('modal-auth-tab-password')
@@ -370,6 +374,9 @@ export class ServerList {
     document
       .getElementById('modal-auth-tab-key')
       ?.addEventListener('click', () => this.setModalAuthMode('key'));
+    document
+      .getElementById('modal-auth-tab-none')
+      ?.addEventListener('click', () => this.setModalAuthMode('none'));
     document
       .getElementById('modal-transport-tab-direct')
       ?.addEventListener('click', () => this.setModalTransportMode('direct'));
@@ -577,8 +584,12 @@ export class ServerList {
   }
 
   private renderServerCard(server: ServerConfig, index = 0, animate = false): string {
-    const authIcon = server.auth_method === 'publickey' ? 'vpn_key' : 'password';
-    const authLabel = server.auth_method === 'publickey' ? 'KEY' : 'PWD';
+    const authIcon =
+      server.auth_method === 'none'
+        ? 'person'
+        : server.auth_method === 'publickey' ? 'vpn_key' : 'password';
+    const authLabel =
+      server.auth_method === 'none' ? 'NONE' : server.auth_method === 'publickey' ? 'KEY' : 'PWD';
     const isTunnel = server.transport_type === 'cf_tunnel';
     const tunnelBadge = isTunnel
       ? `<span class="shrink-0 text-[10px] font-bold tracking-[0.1em] text-[var(--accent-secondary)] border border-[var(--accent-secondary)] px-1.5 py-0.5">${t('server.tunnelBadge')}</span>`
@@ -816,6 +827,7 @@ export class ServerList {
     const title = document.getElementById('modal-title');
     const submitBtn = document.getElementById('server-submit-btn');
     if (!modal || !title || !submitBtn) return;
+    (document.getElementById('server-empty-password') as HTMLInputElement).checked = false;
 
     if (mode === 'add') {
       title.textContent = t('server.add');
@@ -844,11 +856,9 @@ export class ServerList {
         ', '
       );
 
-      if (server.auth_method === 'publickey') {
-        this.setModalAuthMode('key');
-      } else {
-        this.setModalAuthMode('password');
-      }
+      this.setModalAuthMode(
+        server.auth_method === 'publickey' ? 'key' : server.auth_method === 'none' ? 'none' : 'password'
+      );
 
       const transport = server.transport_type === 'cf_tunnel' ? 'cf_tunnel' : 'direct';
       this.setModalTransportMode(transport);
@@ -1015,17 +1025,27 @@ export class ServerList {
     }
   }
 
-  private setModalAuthMode(mode: 'password' | 'key'): void {
+  private setModalAuthMode(mode: 'password' | 'key' | 'none'): void {
     this.modalAuthMode = mode;
-    const pwTab = document.getElementById('modal-auth-tab-password')!;
-    const keyTab = document.getElementById('modal-auth-tab-key')!;
-    const pwSection = document.getElementById('modal-password-section')!;
-    const keySection = document.getElementById('modal-key-section')!;
-
-    pwTab.classList.toggle('auth-tab-active', mode === 'password');
-    keyTab.classList.toggle('auth-tab-active', mode === 'key');
-    pwSection.style.display = mode === 'password' ? '' : 'none';
-    keySection.style.display = mode === 'key' ? '' : 'none';
+    for (const value of ['password', 'key', 'none'] as const) {
+      const tab = document.getElementById(`modal-auth-tab-${value}`)!;
+      tab.classList.toggle('auth-tab-active', mode === value);
+      tab.setAttribute('aria-pressed', String(mode === value));
+      document.getElementById(`modal-${value}-section`)!.style.display = mode === value ? '' : 'none';
+    }
+    const editingPassword =
+      mode === 'password' &&
+      this.editingServerId !== null &&
+      this.editingOriginalAuthMethod === 'password';
+    const emptyPassword = document.getElementById('server-empty-password') as HTMLInputElement;
+    document.getElementById('server-empty-password-option')!
+      .classList.toggle('hidden', !editingPassword);
+    (document.getElementById('server-password') as HTMLInputElement).disabled =
+      editingPassword && emptyPassword.checked;
+    const hint = document.getElementById('server-password-hint')!;
+    const hintKey = editingPassword ? 'server.passwordEditHint' : 'auth.passwordHint';
+    hint.dataset.i18n = hintKey;
+    hint.textContent = t(hintKey);
   }
 
   private getJumpPath(server: ServerConfig): string[] {
@@ -1163,26 +1183,31 @@ export class ServerList {
       return;
     }
 
-    const authMethod = this.modalAuthMode === 'key' ? 'publickey' : 'password';
-    const credential = authMethod === 'publickey' ? privateKey : password;
+    const authMethod = this.modalAuthMode === 'key' ? 'publickey' : this.modalAuthMode;
+    const useEmptyPassword =
+      authMethod === 'password' &&
+      (document.getElementById('server-empty-password') as HTMLInputElement).checked;
+    const credential =
+      authMethod === 'none' || useEmptyPassword
+        ? ''
+        : authMethod === 'publickey' ? privateKey : password;
     const authMethodChanged =
       this.editingServerId !== null &&
       this.editingOriginalAuthMethod !== null &&
       authMethod !== this.editingOriginalAuthMethod;
 
-    // 新增或切换认证方式时必须填写与新方式匹配的凭据
-    if ((!this.editingServerId || authMethodChanged) && !credential) {
+    // 只有私钥必须非空；编辑已有密码时留空仍保留原值，除非明确勾选设为空密码。
+    if (authMethod === 'publickey' && (!this.editingServerId || authMethodChanged) && !credential) {
       notify(
         authMethodChanged
           ? t('server.credentialRequiredAfterAuthChange')
-          : t(authMethod === 'publickey' ? 'auth.validationPrivateKey' : 'auth.validationPassword'),
+          : t('auth.validationPrivateKey'),
         {
           title: t('auth.incompleteCredentials'),
           variant: 'warning',
         }
       );
-      const credentialId = authMethod === 'publickey' ? 'server-private-key' : 'server-password';
-      (document.getElementById(credentialId) as HTMLInputElement | HTMLTextAreaElement)?.focus();
+      (document.getElementById('server-private-key') as HTMLTextAreaElement)?.focus();
       return;
     }
 
@@ -1221,7 +1246,12 @@ export class ServerList {
         transport_type: this.modalTransportMode,
         jump_server_id: isTunnel ? null : jumpServerId,
       };
-      if (credential) body.credential = credential;
+      if (
+        credential ||
+        (authMethod === 'password' && (!this.editingServerId || authMethodChanged || useEmptyPassword))
+      ) {
+        body.credential = credential;
+      }
 
       if (isTunnel && cleanTunnelHost) {
         body.cf_tunnel_host = cleanTunnelHost;

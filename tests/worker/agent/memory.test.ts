@@ -109,7 +109,7 @@ describe('AgentMemoryManager and selectServerMemory', () => {
     expect(emitted).toContainEqual({ subType: 'memory_updated' });
   });
 
-  it('emits conflict status when provider rejects with 409', async () => {
+  it('does not trust an arbitrary storage error status and emits only safe diagnostics', async () => {
     const provider: AgentMemoryProvider = {
       fetchUnifiedMemory: vi.fn(async () => sampleMemory),
       saveBatchMemory: vi.fn(async () => {
@@ -144,6 +144,8 @@ describe('AgentMemoryManager and selectServerMemory', () => {
       sessionId: 'sess_1',
     });
 
-    expect(emitted).toContainEqual({ subType: 'memory_status', code: 'memory_failed' });
+    expect(emitted).toContainEqual(expect.objectContaining({ subType: 'memory_status', code: 'memory_failed',
+      errorCode: 'responses_failed', diagnostics: { purpose: 'memory' } }));
+    expect(JSON.stringify(emitted)).not.toContain('Conflict');
   });
 });

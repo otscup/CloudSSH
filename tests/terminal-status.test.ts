@@ -15,6 +15,9 @@ describe('SSH 状态国际化', () => {
     expect(localizedSSHMessage('认证失败：用户名或密码错误', 'auth_failed')).toBe(
       'Authentication failed: the username, credential, or interactive response was rejected'
     );
+    expect(localizedSSHMessage('服务器拒绝无认证', 'auth_none_rejected')).toBe(
+      'The server rejected none authentication. Select an authentication method supported by the server.'
+    );
     expect(localizedSSHMessage('服务器要求交互式认证', 'auth_interactive_required')).toBe(
       'The server requires interactive authentication'
     );

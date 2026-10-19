@@ -34,6 +34,123 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
+test('none 与空密码可保存，编辑留空保留旧密码，显式勾选才能清空', async ({ page }) => {
+  let rows = [servers[0]];
+  const added: Array<Record<string, unknown>> = [];
+  const updated: Array<Record<string, unknown>> = [];
+  await page.route('**/api/servers', (route) => {
+    const method = route.request().method();
+    if (method === 'GET') return route.fulfill({ json: rows });
+    if (method !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON();
+    added.push(body);
+    const server = { ...servers[0], ...body, id: rows.length + 1 };
+    rows.push(server);
+    return route.fulfill({ status: 201, json: server });
+  });
+  await page.route('**/api/servers/1', (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const body = route.request().postDataJSON();
+    updated.push(body);
+    rows = rows.map((server) => server.id === 1 ? { ...server, auth_method: body.auth_method } : server);
+    return route.fulfill({ json: rows[0] });
+  });
+  await page.goto('/?lang=zh-CN');
+  await page.locator('#add-server-btn').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#modal-auth-tab-password')).toHaveClass(/auth-tab-active/);
+  await page.locator('#server-name').fill('Username only');
+  await page.locator('#server-host').fill('ssh.example.com');
+  await page.locator('#server-username').fill('token-user');
+  await page.locator('#server-password').fill('must-not-save');
+  await page.locator('#modal-auth-tab-none').click();
+  await expect(page.locator('#server-password')).toBeHidden();
+  await expect(page.locator('#server-private-key')).toBeHidden();
+  await expect(page.locator('#modal-none-section')).toBeVisible();
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => added.length).toBe(1);
+  expect(added[0].auth_method).toBe('none');
+  expect(added[0]).not.toHaveProperty('credential');
+  await expect(page.locator('#card-2')).toContainText('NONE');
+
+  await page.locator('#clone-2').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#modal-auth-tab-none')).toHaveClass(/auth-tab-active/);
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => added.length).toBe(2);
+  expect(added[1].auth_method).toBe('none');
+  expect(added[1]).not.toHaveProperty('credential');
+
+  await page.locator('#edit-1').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#modal-auth-tab-key')).toHaveClass(/auth-tab-active/);
+  await page.locator('#modal-auth-tab-none').click();
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => updated.length).toBe(1);
+  expect(updated[0].auth_method).toBe('none');
+  expect(updated[0]).not.toHaveProperty('credential');
+  await expect(page.locator('#server-modal')).toBeHidden();
+
+  await page.locator('#edit-1').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#modal-auth-tab-none')).toHaveClass(/auth-tab-active/);
+  await page.locator('#modal-auth-tab-password').click();
+  await expect(page.locator('#server-empty-password-option')).toBeHidden();
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => updated.length).toBe(2);
+  expect(updated[1]).toMatchObject({ auth_method: 'password', credential: '' });
+  await expect(page.locator('#server-modal')).toBeHidden();
+
+  await page.locator('#edit-1').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#server-empty-password-option')).toBeVisible();
+  await expect(page.locator('#server-password-hint')).toContainText('留空保留');
+  await page.locator('#server-password').fill('fresh-secret');
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => updated.length).toBe(3);
+  expect(updated[2]).toMatchObject({ auth_method: 'password', credential: 'fresh-secret' });
+  await expect(page.locator('#server-modal')).toBeHidden();
+
+  await page.locator('#edit-1').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#server-password')).toHaveValue('');
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => updated.length).toBe(4);
+  expect(updated[3].auth_method).toBe('password');
+  expect(updated[3]).not.toHaveProperty('credential');
+  await expect(page.locator('#server-modal')).toBeHidden();
+
+  await page.locator('#edit-1').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await page.locator('#server-empty-password').check();
+  await expect(page.locator('#server-password')).toBeDisabled();
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => updated.length).toBe(5);
+  expect(updated[4]).toMatchObject({ auth_method: 'password', credential: '' });
+  await expect(page.locator('#server-modal')).toBeHidden();
+
+  await page.locator('#edit-1').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#server-empty-password')).not.toBeChecked();
+  await expect(page.locator('#server-password')).toBeEnabled();
+  await page.locator('#modal-auth-tab-key').click();
+  await page.locator('#server-submit-btn').click();
+  await expect(page.locator('.app-toast').filter({ hasText: '切换认证方式后' })).toBeVisible();
+  expect(updated).toHaveLength(5);
+  await page.locator('#modal-close-btn').click();
+
+  await page.locator('#add-server-btn').click();
+  await expect(page.locator('#server-name')).toBeFocused();
+  await expect(page.locator('#server-password')).toBeEnabled();
+  await expect(page.locator('#server-empty-password-option')).toBeHidden();
+  await page.locator('#server-name').fill('Empty password');
+  await page.locator('#server-host').fill('ssh.example.com');
+  await page.locator('#server-username').fill('alice');
+  await page.locator('#server-submit-btn').click();
+  await expect.poll(() => added.length).toBe(3);
+  expect(added[2]).toMatchObject({ auth_method: 'password', credential: '' });
+});
+
 test('paginates after filtering and resets to the first page', async ({ page }) => {
   await page.goto('/');
 

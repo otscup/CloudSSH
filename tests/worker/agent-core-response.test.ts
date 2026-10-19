@@ -11,7 +11,7 @@ function setup(options: any = {}) {
   const terminal = new TerminalContext();
   const exec = vi.fn(async () => ({ stdout: 'Linux', stderr: '', exitCode: 0 }));
   const waits: Promise<unknown>[] = [];
-  const agent = new AgentCore(terminal, frame => frames.push(frame), async () => aiConfig,
+  const agent = new AgentCore(terminal, frame => frames.push(frame), async () => options.aiConfig || aiConfig,
     options.exec || exec, async () => true, options.config, options.memory, promise => waits.push(promise));
   return { agent, frames, terminal, exec, waits };
 }
@@ -49,6 +49,62 @@ describe('AgentCore Responses delivery and context', () => {
     expect(requests[1].tools).toEqual(requests[0].tools);
     expect(requests[1].prompt_cache_key).toBe(requests[0].prompt_cache_key);
     expect(requests[0].instructions).not.toContain('terminal unchanged');
+  });
+
+  it('replays opaque reasoning and assistant phases across tool and user turns without exposing them as evidence', async () => {
+    const { agent, frames, exec } = setup();
+    const requests: any[] = [];
+    const reasoning = { type: 'reasoning', id: 'rs_native', summary: [], status: 'completed',
+      encrypted_content: 'OPAQUE_STATE', content: [{ type: 'reasoning_text', text: 'PRIVATE_REASONING' }] };
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse(init!.body as string);
+      requests.push(body);
+      const response: any = responseObject(`resp_${requests.length}`, 'Visible', requests.length === 1 ? [functionCall()] : []);
+      response.output.at(-1).phase = requests.length === 1 ? 'commentary' : 'final_answer';
+      if (requests.length === 1) response.output.unshift(reasoning);
+      return sse([{ type: 'response.completed', response }]);
+    });
+    await agent.handleAgentStart('1', 'Inspect');
+    await agent.handleAgentStart('1', 'Explain');
+    expect(requests).toHaveLength(3);
+    expect(requests[1].input).toContainEqual(reasoning);
+    expect(requests[2].input).toContainEqual(reasoning);
+    expect(requests[1].input).toContainEqual(expect.objectContaining({ phase: 'commentary' }));
+    expect(requests[2].input).toContainEqual(expect.objectContaining({ phase: 'final_answer' }));
+    expect(exec).toHaveBeenCalledTimes(2); // one environment probe and one actual command
+    expect(JSON.stringify(frames)).not.toMatch(/OPAQUE_STATE|PRIVATE_REASONING/);
+    expect(JSON.stringify((agent as any).context.records)).not.toMatch(/OPAQUE_STATE|PRIVATE_REASONING/);
+  });
+
+  it('applies model budgets and requires a fresh chat when they change', async () => {
+    const config = { ...aiConfig, context_window: 32_768, max_output_tokens: 2048 };
+    const { agent, frames } = setup({ aiConfig: config });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('resp_budget'));
+    await agent.handleAgentStart('1', 'Inspect');
+    expect(JSON.parse(fetch.mock.calls[0][1]!.body as string).max_output_tokens).toBe(2048);
+    config.max_output_tokens = 1024;
+    await agent.handleAgentStart('1', 'Again');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(frames.find(frame => frame.code === 'responses_config_changed')).toBeTruthy();
+  });
+
+  it('schema capability fallback still rejects invalid checkpoints and preserves tool history', async () => {
+    const { agent, frames } = setup();
+    let requests = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      requests++;
+      const body = JSON.parse(init!.body as string);
+      if (body.text) return new Response(JSON.stringify({ error: { code: 'unsupported_parameter', param: 'text.format' } }), { status: 400 });
+      if (!body.stream) return new Response(JSON.stringify(responseObject('resp_bad_checkpoint', '{}')));
+      const response = responseObject('resp_first', '', [functionCall()]);
+      response.usage.input_tokens = 55_000;
+      return sse([{ type: 'response.completed', response }]);
+    });
+    await agent.handleAgentStart('1', 'Inspect');
+    expect(requests).toBe(3);
+    expect(frames.find(frame => frame.code === 'responses_schema')).toMatchObject({ diagnostics: { purpose: 'checkpoint' } });
+    expect((agent as any).context.pending[0].type).toBe('function_call_output');
+    expect((agent as any).context.history).toContainEqual(expect.objectContaining({ type: 'function_call' }));
   });
 
   it('appends changed terminal observations without changing the instruction prefix', async () => {

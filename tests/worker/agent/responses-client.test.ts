@@ -10,6 +10,63 @@ const request = { input: [{ role: 'user' as const, content: 'Inspect' }], instru
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('Responses protocol and execution boundary', () => {
+  it('preserves safe incomplete metadata even when a checkpoint rejects the response before text parsing', async () => {
+    const body = { ...responseObject('limited', 'SECRET_PARTIAL'), status: 'incomplete',
+      incomplete_details: { reason: 'max_output_tokens', secret: 'SECRET_REASON' },
+      usage: { output_tokens: 2000, output_tokens_details: { reasoning_tokens: 1800 } } };
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify(body)));
+    const client = new ResponsesClient({ ...aiConfig, max_output_tokens: 2048 });
+    const error = await client.create({ ...request, purpose: 'checkpoint', stream: false, tools: undefined }, new AbortController().signal).catch(error => error);
+    expect(error).toMatchObject({ code: 'responses_incomplete', diagnostics: { purpose: 'checkpoint', stage: 'parse',
+      parameter: 'max_output_tokens', incompleteReason: 'max_output_tokens', requestedOutputTokens: 2048,
+      outputTokens: 2000, reasoningTokens: 1800, requestId: expect.any(String) } });
+    expect(JSON.stringify(error)).not.toContain('SECRET');
+  });
+
+  it.each(['content_filter', 'SECRET_UNKNOWN'])('does not auto-stitch a non-token incomplete main response (%s)', async reason => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      ...responseObject('limited', 'partial'), status: 'incomplete', incomplete_details: { reason },
+    }), { headers: { 'Content-Type': 'application/json' } }));
+    const error = await new ResponsesClient(aiConfig).create({ ...request, allowIncomplete: true }, new AbortController().signal).catch(error => error);
+    expect(error).toMatchObject({ code: 'responses_incomplete', diagnostics: { incompleteReason: reason === 'content_filter' ? reason : 'unknown' } });
+    expect(JSON.stringify(error)).not.toContain('SECRET');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['reasoning', 'reasoning.effort'])('omits only an explicitly unsupported reasoning hint (%s)', async parameter => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      error: { code: 'unsupported_parameter', param: parameter },
+    }), { status: 400 })).mockImplementation(async () => new Response(JSON.stringify(responseObject('done'))));
+    const client = new ResponsesClient(aiConfig);
+    const auxiliary = { ...request, purpose: 'checkpoint' as const, stream: false, tools: undefined, reasoning: { effort: 'low' as const } };
+    await client.create(auxiliary, new AbortController().signal);
+    await client.create(auxiliary, new AbortController().signal);
+    const bodies = fetch.mock.calls.map(([, init]) => JSON.parse(init!.body as string));
+    expect(bodies[0].reasoning).toEqual({ effort: 'low' });
+    expect(bodies[1]).not.toHaveProperty('reasoning');
+    expect(bodies[2]).not.toHaveProperty('reasoning');
+    expect(bodies.every(body => body.store === false && body.input[0].content === 'Inspect')).toBe(true);
+    expect((fetch.mock.calls[0][1]!.headers as any)['Idempotency-Key']).not.toBe((fetch.mock.calls[1][1]!.headers as any)['Idempotency-Key']);
+  });
+
+  it('does not reinterpret an incomplete store:true response as recoverable token exhaustion', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      ...responseObject('limited', '', [], { store: true }), status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+    })));
+    await expect(new ResponsesClient(aiConfig).create({ ...request, purpose: 'checkpoint', stream: false }, new AbortController().signal))
+      .rejects.toMatchObject({ code: 'responses_storage' });
+  });
+
+  it('preflights the exact serialized payload including output reserve without sending a request', async () => {
+    const client = new ResponsesClient(aiConfig);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(sse([{ type: 'response.completed', response: responseObject('done') }]));
+    expect(client.canFit(request)).toBe(true);
+    const oversized = { ...request, instructions: '界'.repeat(24_000) };
+    expect(client.canFit(oversized)).toBe(false);
+    await expect(client.create(oversized, new AbortController().signal)).rejects.toMatchObject({ code: 'responses_budget' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('normalizes only HTTPS roots/responses, preserving credential-bound path case', () => {
     expect(normalizeAIBaseUrl('https://API.EXAMPLE.COM/V1/responses/')).toBe('https://api.example.com/V1');
     for (const address of ['http://example.com/v1', 'https://user:secret@example.com/v1', 'https://example.com/v1?key=secret',

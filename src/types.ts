@@ -46,7 +46,7 @@ export interface SSHConnectionConfig {
   port: number;
   username: string;
   password: string;
-  authMethod?: 'password' | 'publickey';
+  authMethod?: 'password' | 'publickey' | 'none';
   privateKey?: string;
   cols?: number;
   rows?: number;
@@ -111,7 +111,7 @@ export interface SSHJumpHostConfig {
   port: number;
   username: string;
   password: string;
-  authMethod: 'password' | 'publickey';
+  authMethod: 'password' | 'publickey' | 'none';
   privateKey: string;
   expectedFingerprint?: string;
   knownHostIdentity: string;
@@ -215,7 +215,7 @@ export interface ServerConfig {
   host: string;
   port: number;
   username: string;
-  auth_method: 'password' | 'publickey';
+  auth_method: 'password' | 'publickey' | 'none';
   /** 用户手动指定的区域偏好；空表示 Auto（依赖系统推断的 inferred_hint） */
   region?: string | null;
   /** 系统在保存/更新服务器时通过第三方 IPinfo 自动推断并持久化的 hint */

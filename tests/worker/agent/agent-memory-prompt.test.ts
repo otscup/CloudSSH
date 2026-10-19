@@ -86,6 +86,23 @@ describe('Responses task records and server memory', () => {
     expect(tw).toContain('必須輸出 "mode": "update_latest"');
   });
 
+  it('keeps prompt examples aligned with every required memory schema field', () => {
+    const example = JSON.parse(MEMORY_DISTILLATION_PROMPT.match(/示例格式：\n([\s\S]+?)\n若本轮/)![1]);
+    for (const key of MEMORY_FORMAT.schema.required) expect(example).toHaveProperty(key);
+    for (const key of MEMORY_FORMAT.schema.properties.workLog.anyOf[1].required!) {
+      expect(example.workLog).toHaveProperty(key);
+    }
+    const schema = MEMORY_FORMAT.schema.properties.knowledge.items;
+    for (const item of example.knowledge) {
+      expect(Object.keys(item).sort()).toEqual([...schema.required].sort());
+      expect(schema.properties.action.enum).toContain(item.action);
+      expect(schema.properties.category.enum).toContain(item.category);
+      expect(item.action === 'delete' ? item.value === null : typeof item.value === 'string').toBe(true);
+    }
+    expect(MEMORY_DISTILLATION_PROMPT).toContain('512');
+    expect(MEMORY_DISTILLATION_PROMPT).toContain('严禁截断或猜测');
+  });
+
   it('uses strict structured schemas for both checkpoint and memory, allowing null workLog', () => {
     expect(MEMORY_DISTILLATION_PROMPT).toContain('服务器智能会话总结助手');
     expect(MEMORY_DISTILLATION_PROMPT).toContain('状态不明');

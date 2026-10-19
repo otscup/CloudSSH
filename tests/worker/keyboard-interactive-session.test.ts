@@ -115,6 +115,49 @@ describe('SSHSession keyboard-interactive authentication', () => {
     expect(readAuthMethod(sendEncrypted.mock.calls[1][0])).toBe('keyboard-interactive');
   });
 
+  it.each([true, false])('显式 none 认证成功后复用 Shell/跳板流程（openShell=%s）', async (openShell) => {
+    const { session, sendEncrypted, ws } = createSession('must-not-send');
+    const internal = session as any;
+    internal.config.authMethod = 'none';
+    internal.config.username = 'access-token-user';
+    internal.config.privateKey = 'must-not-send-key';
+    internal.openShellOnAuth = openShell;
+    internal.openShell = vi.fn(async () => {});
+
+    await internal.authenticate();
+    const request = sendEncrypted.mock.calls[0][0];
+    expect(readAuthMethod(request)).toBe('none');
+    expect(readString(request, 1).value).toBe('access-token-user');
+    expect(new TextDecoder().decode(request)).not.toContain('must-not-send');
+    expect(internal.canUseAuthMethod('password')).toBe(false);
+    expect(internal.canUseAuthMethod('publickey')).toBe(false);
+    expect(internal.canUseAuthMethod('keyboard-interactive')).toBe(false);
+
+    await internal.handleAuthPacket(52, new Uint8Array([52]));
+    await expect(session.waitUntilAuthenticated()).resolves.toBeUndefined();
+    expect(internal.state).toBe(openShell ? 'shell' : 'tunnel-ready');
+    expect(internal.openShell).toHaveBeenCalledTimes(openShell ? 1 : 0);
+    expect(ws.close).not.toHaveBeenCalled();
+    expect(JSON.stringify(ws.send.mock.calls)).not.toContain('access-token-user');
+    session.close(true);
+  });
+
+  it.each([
+    ['password,publickey,keyboard-interactive', false],
+    ['', false],
+    ['none,password,keyboard-interactive', true],
+  ])('none 被拒绝时正常关闭且不回退（methods=%s partial=%s）', async (methods, partial) => {
+    const { session, sendEncrypted, ws } = createSession('must-not-send');
+    (session as any).config.authMethod = 'none';
+    await (session as any).authenticate();
+    await (session as any).handleAuthPacket(51, buildFailure(methods, partial));
+
+    expect(sendEncrypted).toHaveBeenCalledOnce();
+    expect(sentJson(ws)).toMatchObject({ type: 'error', event: 'auth_none_rejected' });
+    expect(ws.close).toHaveBeenCalledWith(1000);
+    expect((session as any).pendingAuthChallenge).toBeNull();
+  });
+
   it('selects the configured password after discovery and tolerates an omitted method list', async () => {
     const advertised = createSession();
     await (advertised.session as any).authenticate();
@@ -125,6 +168,42 @@ describe('SSHSession keyboard-interactive authentication', () => {
     await (omitted.session as any).authenticate();
     await (omitted.session as any).handleAuthPacket(51, buildFailure(''));
     expect(readAuthMethod(omitted.sendEncrypted.mock.calls[1][0])).toBe('password');
+  });
+
+  it('空密码可选择 password 认证且按零长度字符串发送', async () => {
+    const { session, sendEncrypted, ws } = createSession('');
+    await (session as any).authenticate();
+    await (session as any).handleAuthPacket(51, buildFailure('password,keyboard-interactive'));
+    const request = sendEncrypted.mock.calls[1][0];
+    expect(readAuthMethod(request)).toBe('password');
+    let offset = 1;
+    for (let index = 0; index < 3; index++) offset = readString(request, offset).next;
+    expect(request[offset++]).toBe(0); // password change flag
+    expect(readString(request, offset)).toEqual({ value: '', next: request.length });
+    (session as any).openShell = vi.fn(async () => {});
+    await (session as any).handleAuthPacket(52, new Uint8Array([52]));
+    await expect(session.waitUntilAuthenticated()).resolves.toBeUndefined();
+    expect(ws.close).not.toHaveBeenCalled();
+    session.close(true);
+  });
+
+  it('空密码配置可进入 keyboard-interactive，用户回车提交空响应', async () => {
+    const { session, sendEncrypted, ws } = createSession('');
+    await (session as any).authenticate();
+    await (session as any).handleAuthPacket(51, buildFailure('keyboard-interactive'));
+    expect(readAuthMethod(sendEncrypted.mock.calls[1][0])).toBe('keyboard-interactive');
+    await (session as any).handleAuthPacket(60, buildInfoRequest([{ text: 'Password: ', echo: false }]));
+    const challenge = sentJson(ws);
+    expect(challenge.canUseStoredPassword).toBe(false);
+    await session.handleWebSocketMessage(JSON.stringify({ type: 'auth_challenge_ack', id: challenge.id }));
+    expect(sendEncrypted).toHaveBeenCalledTimes(2); // never auto-submit an empty answer
+    await session.handleWebSocketMessage(JSON.stringify({ type: 'auth_response', id: challenge.id, responses: [''] }));
+    expect(readInfoResponses(sendEncrypted.mock.calls[2][0])).toEqual(['']);
+    expect((session as any).pendingAuthChallenge).toBeNull();
+    (session as any).openShell = vi.fn(async () => {});
+    await (session as any).handleAuthPacket(52, new Uint8Array([52]));
+    await expect(session.waitUntilAuthenticated()).resolves.toBeUndefined();
+    session.close(true);
   });
 
   it('does not reinterpret a rejected configured method as keyboard-interactive', async () => {

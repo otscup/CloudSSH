@@ -229,6 +229,10 @@ describe('SSHAuth keyboard-interactive (RFC 4256)', () => {
     it('encodes zero, multiple and Unicode responses', () => {
       const empty = SSHAuth.buildKeyboardInteractiveInfoResponse([]);
       expect(empty).toEqual(new Uint8Array([61, 0, 0, 0, 0]));
+      // One empty response is not the same as a zero-prompt informational round.
+      expect(SSHAuth.buildKeyboardInteractiveInfoResponse([''])).toEqual(
+        new Uint8Array([61, 0, 0, 0, 1, 0, 0, 0, 0])
+      );
 
       const packet = SSHAuth.buildKeyboardInteractiveInfoResponse(['alice', '密碼🔐']);
       expect(packet[0]).toBe(61);

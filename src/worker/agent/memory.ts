@@ -1,5 +1,5 @@
 import { isSensitiveKeyOrValue, normalizeKnowledgeInput, normalizeWorkLogInput,
-  WORK_LOG_TITLE_MAX_LENGTH, type UnifiedServerMemory } from '../../server-memory-schema';
+  VALID_KNOWLEDGE_CATEGORIES, WORK_LOG_TITLE_MAX_LENGTH, type UnifiedServerMemory } from '../../server-memory-schema';
 import { boundedText, boundedUtf8, bytes } from './context-limits';
 import { observation } from './context';
 import { redactEvidence } from './execution-journal';
@@ -58,6 +58,46 @@ function parseObject(text: string): Record<string, unknown> {
   throw new ResponsesError('responses_schema');
 }
 
+interface DistilledMemory {
+  workLog?: AgentMemoryBatch['workLog'];
+  knowledge: Array<Extract<ReturnType<typeof normalizeKnowledgeInput>, { ok: true }>['value']>;
+}
+
+function parseDistillation(text: string): DistilledMemory {
+  const parsed = parseObject(text);
+  if (!Object.hasOwn(parsed, 'workLog') || !Array.isArray(parsed.knowledge) || parsed.knowledge.length > 100 ||
+    Object.keys(parsed).some(key => key !== 'workLog' && key !== 'knowledge')) {
+    throw new ResponsesError('responses_schema');
+  }
+  const batch: DistilledMemory = { knowledge: [] };
+  if (parsed.workLog !== null) {
+    if (!parsed.workLog || typeof parsed.workLog !== 'object' || Array.isArray(parsed.workLog)) {
+      throw new ResponsesError('responses_schema');
+    }
+    const raw = parsed.workLog as Record<string, unknown>;
+    if ((raw.mode !== 'create' && raw.mode !== 'update_latest') ||
+      Object.keys(raw).some(key => !['mode', 'title', 'summary'].includes(key))) {
+      throw new ResponsesError('responses_schema');
+    }
+    const log = normalizeWorkLogInput(raw, { truncate: true });
+    if (!log.ok) throw new ResponsesError('responses_schema');
+    batch.workLog = log.value;
+  }
+  for (const item of parsed.knowledge) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) ||
+      !['set', 'delete'].includes(item.action) || !VALID_KNOWLEDGE_CATEGORIES.includes(item.category) ||
+      (item.action === 'delete' && item.value !== null) ||
+      Object.keys(item).some(key => !['action', 'category', 'key', 'value'].includes(key))) {
+      throw new ResponsesError('responses_schema');
+    }
+    // Never truncate credentials or salvage a partial batch from malformed model output.
+    const normalized = normalizeKnowledgeInput(item);
+    if (!normalized.ok) throw new ResponsesError('responses_schema');
+    batch.knowledge.push(normalized.value);
+  }
+  return batch;
+}
+
 export class AgentMemoryManager {
   private queue: MemoryJob[] = [];
   private running: Promise<void> | null = null;
@@ -97,7 +137,10 @@ export class AgentMemoryManager {
       try { await this.distill(job, this.controller.signal); }
       catch (error) {
         if (job.epoch === this.epoch()) this.emit({ subType: 'memory_status',
-          code: error instanceof ResponsesError && error.status === 409 ? 'memory_conflict' : 'memory_failed' });
+          code: error instanceof ResponsesError && error.status === 409 ? 'memory_conflict' : 'memory_failed',
+          errorCode: error instanceof ResponsesError ? error.code : 'responses_failed',
+          status: error instanceof ResponsesError ? error.status : undefined,
+          diagnostics: { purpose: 'memory', ...(error instanceof ResponsesError ? error.diagnostics : {}) } });
       } finally { clearTimeout(timer); this.controller = null; }
     }
   }
@@ -129,27 +172,42 @@ export class AgentMemoryManager {
       existingWorkLogs: job.memory.workLogs.slice(0, 2), known,
       time: new Date().toISOString(), timezone: job.timezone, locale: job.locale });
     if (bytes(input) > 48 * 1024) throw new ResponsesError('responses_budget');
-    const result = await new ResponsesClient(job.config).create({ stream: false,
-      instructions: MEMORY_DISTILLATION_PROMPT + '\nPreserve actual status fields. Existing user-authored facts are protected. Never infer credentials from tool output. Prefer null workLog for trivial chat.',
-      input: [observation('memory evidence', input)], max_output_tokens: 4096,
-      text: { format: MEMORY_FORMAT } }, signal);
-    console.info('Agent Responses auxiliary usage', { purpose: 'memory', input: result.usage?.input_tokens,
-      output: result.usage?.output_tokens, cached: result.usage?.input_tokens_details?.cached_tokens,
-      reasoning: result.usage?.output_tokens_details?.reasoning_tokens });
-    signal.throwIfAborted();
-    if (job.epoch !== this.epoch()) return;
-    const parsed = parseObject(result.text);
-    if (!Object.hasOwn(parsed, 'workLog') || !Array.isArray(parsed.knowledge) || parsed.knowledge.length > 100) {
-      throw new ResponsesError('responses_schema');
+    // Some gateways accept text.format but ignore it. Keep the same contract in the instructions.
+    const instructions = MEMORY_DISTILLATION_PROMPT +
+      '\nPreserve actual status fields. Existing user-authored facts are protected. Never infer credentials from tool output. Prefer null workLog for trivial chat.' +
+      '\nReturn only one JSON object matching this JSON Schema:\n' + JSON.stringify(MEMORY_FORMAT.schema);
+    const client = new ResponsesClient(job.config);
+    let distilled: DistilledMemory | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      signal.throwIfAborted();
+      if (job.epoch !== this.epoch()) return;
+      // This is a new, tool-free generation after a COMPLETED but invalid memory result,
+      // not a transport retry or continuation. Never echo the invalid output or replay SSH.
+      const result = await client.create({ purpose: 'memory', stream: false,
+        instructions: instructions + (attempt ? '\nThe previous memory output failed local validation. Regenerate from the original evidence. Include every required field; use short atomic facts and omit unsupported facts. Do not output Markdown or explanations.' : ''),
+        input: [observation('memory evidence', input)], max_output_tokens: 4096,
+        text: { format: MEMORY_FORMAT } }, signal);
+      console.info('Agent Responses auxiliary usage', { purpose: 'memory', input: result.usage?.input_tokens,
+        output: result.usage?.output_tokens, cached: result.usage?.input_tokens_details?.cached_tokens,
+        reasoning: result.usage?.output_tokens_details?.reasoning_tokens });
+      signal.throwIfAborted();
+      if (job.epoch !== this.epoch()) return;
+      try {
+        distilled = parseDistillation(result.text);
+        break;
+      } catch (error) {
+        if (!(error instanceof ResponsesError) || error.code !== 'responses_schema') throw error;
+        if (attempt === 1) {
+          error.diagnostics = { purpose: 'memory', stage: 'parse', parameter: 'text.format', requestId: result.requestId };
+          throw error;
+        }
+      }
     }
+    if (!distilled) throw new ResponsesError('responses_schema');
     const batch: AgentMemoryBatch = { expectedRevision,
-      sessionId: job.sessionId, epoch: job.epoch, knowledge: [] };
-    if (parsed.workLog != null) {
-      if (typeof parsed.workLog !== 'object' || Array.isArray(parsed.workLog)) throw new ResponsesError('responses_schema');
-      const log = normalizeWorkLogInput(parsed.workLog as Record<string, unknown>, { truncate: true });
-      if (!log.ok) throw new ResponsesError('responses_schema');
-      batch.workLog = log.value;
-      if (this.lastLogId && job.memory.workLogs.some(item => item.id === this.lastLogId)) batch.targetLogId = this.lastLogId;
+      sessionId: job.sessionId, epoch: job.epoch, workLog: distilled.workLog, knowledge: [] };
+    if (batch.workLog && this.lastLogId && job.memory.workLogs.some(item => item.id === this.lastLogId)) {
+      batch.targetLogId = this.lastLogId;
     }
     const unknown = operations.filter(op => op.status === 'unknown');
     if (unknown.length) {
@@ -161,11 +219,7 @@ export class AgentMemoryManager {
       batch.workLog.title = `${prefix}${batch.workLog.title}`.slice(0, WORK_LOG_TITLE_MAX_LENGTH);
     }
     const successful = job.records.filter(record => record.role === 'tool' && record.status === 'succeeded').map(record => record.content).join('\n');
-    for (const item of parsed.knowledge) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new ResponsesError('responses_schema');
-      const normalized = normalizeKnowledgeInput(item);
-      if (!normalized.ok) throw new ResponsesError('responses_schema');
-      const value = normalized.value;
+    for (const value of distilled.knowledge) {
       const sensitive = value.category === 'credential' || isSensitiveKeyOrValue(value.key, value.value);
       const existing = job.memory.knowledge.find(entry => entry.key === value.key);
       if (existing?.source === 'user' && !job.goal.toLowerCase().includes(value.key)) continue;
