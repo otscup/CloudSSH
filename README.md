@@ -81,7 +81,8 @@
 ### 安全可靠
 
 - **双段加密**：浏览器 ↔ Worker 走 HTTPS/WSS；Worker ↔ 服务器走完整 SSH-2.0 协议（Curve25519-SHA256/ECDH-NISTP256 密钥交换、AES-256-GCM/CTR 加密、HMAC-SHA2 完整性校验）。
-- **主机指纹验证**：Ed25519/ECDSA P-256/P-384/P-521/RSA 签名校验，首次连接展示 SHA-256 指纹（TOFU）。
+- **主机指纹验证**：Ed25519/ECDSA P-256/P-384/P-521/RSA 签名校验，首次连接展示 SHA-256 指纹（TOFU）。兼容 Ed25519、RSA-SHA2-256/512 和 ECDSA P-256/P-384/P-521 OpenSSH 主机证书：检查证书签名、有效期、主机类型和关键限制，再以底层公钥验证 SSH 握手并保存稳定指纹。此模式仍是公钥 TOFU，不自动信任证书内的 CA，也不把 principals 当作已获 CA 授权的主机身份；尚不提供 CA 信任库。证书续签不改变同一公钥的指纹，实际公钥变更仍须明确确认。
+- **加密私钥与 MFA**：支持在浏览器内解锁 OpenSSH bcrypt/AES-CTR 与 PKCS#8 PBES2 私钥；口令不保存、不发送至 Worker，但解锁私钥仍由 Worker 用于签名。匿名连接默认不持久化解锁材料，保存服务器须单独同意。支持公钥成功后的显式 password 第二因素，保留现有 OTP 交互认证。范围、预算与真实互操作测试见 [SSH 兼容说明](docs/ssh-compatibility.md)。
 - **多层防护**：IPv6/保留地址 SSRF + DNS 防重绑定、Worker 内存限流削峰、Turnstile 人机验证；已保存凭据在每用户 SQLite 中以 AES-256-GCM 加密存储。
 - **会话隔离**：每个终端会话由独立 Durable Object 管理，活动 SSH TCP 连接使会话保持唤醒。
 - **凭据内部流转**：一键连接时服务端解密凭据并经一次性令牌内部传递到会话，浏览器全程不接触明文。
@@ -119,11 +120,11 @@
 - **智能区域调度（locationHint）**：保存直连服务器时通过 IPinfo 查询主机地理信息并持久化 DO 部署区域，连接时直接读取数据库，不再执行外部地理查询；使用 SSH 跳板时仅对 Cloudflare 直接连接的最外层入口进行推断，下游内网服务器不会触发查询，其区域设置由入口统一决定。查询失败时自动退化为 Cloudflare 默认调度，也可为直连入口手动覆盖区域偏好。_注意：自动推断会把直连入口的主机信息发送给第三方 IPinfo；locationHint 是 Cloudflare 的 best-effort 特性，当目标区域 DO 容量不足时会 fallback 到最近可用区域。_
 - **终端文本检索与快捷键**：支持使用快捷键 `Ctrl+Shift+F`（或 macOS 下 `Cmd+F`）呼出搜索框，实时检索终端历史日志；支持使用 `Cmd+K` (macOS) / `Ctrl+Shift+K` (Win/Linux) 一键清空屏幕与滚动历史，保留纯 `Ctrl+K` 行编辑能力不冲突。
 - **终端日志一键导出**：支持通过顶栏的下载按钮，将当前活跃会话终端的完整屏幕历史 buffer 一键导出并下载为 `.txt` 文本文件，解决长日志在浏览器下鼠标选取容易卡顿的痛点。
-- **AI 智能助手与运维工作备忘系统**：内置 AI Agent 侧边栏，支持 BYOK（自带 API Key）接入原生无状态 Responses API（`store: false`），原生兼容 OpenAI 官方（GPT-4o、o1、o3-mini 等）及支持 Responses 规范的聚合服务商（如 OpenRouter），不支持传统 Chat Completions 专用接口。由 CloudSSH 在本地持久管理有界上下文、执行事实与结构化服务器记忆，无状态模式避免远端保存敏感服务器会话，同时杜绝上游状态污染。配置面板采用现代化自定义 Combobox 下拉选择器（支持全量展开、即时模糊过滤、一键清空及多套内置主题自适应），支持使用已保存密钥免重复输入 Token 安全拉取模型列表，服务端实现 Base URL 强绑定防凭据外带（Credential Exfiltration）、同源 CSRF 检查与敏感信息脱敏防护。输入框上方提供快捷诊断 Prompt 气泡（Quick Prompt Chips：分析报错、系统负载、网络端口、Docker 状态），一键填充结构化排查提示词并自动聚焦输入框。内置 7 个专业运维工具（执行命令、读取终端上下文、探测环境、进程列表、systemctl 服务管理、Docker 容器管理及用户确认）。支持终端划词“询问 AI 助手”独立上下文附件、代码块一键复制及安全单行命令填入终端。支持 LLM 流式输出与思考过程容器折叠，危险操作多级安全拦截与用户确认。
-  - **Responses 兼容与诊断**：保留标准推理续接字段及 assistant `phase`，不展示或长期保存推理；始终请求 `store:false`，实际留存政策仍需核对服务商。仅对明确报告不支持的可选参数做有界兼容，严格工具/JSON Schema 提示可回退，但本地参数、安全和记忆校验不放松；普通 400、缺失完成事件、工具不完整和已执行操作不会被盲目重试。错误展示调用阶段、白名单错误码/参数及本地请求标识，不输出服务商原始错误正文。AI 设置中可按当前模型调整上下文窗口/输出 Token 预算（默认 64,000/8,192，输出含推理），修改后新建 Agent 会话；模型列表可获取不代表具备全部 Agent 能力。
-  - **双轨长期记忆系统**：具备精准时间感知与用户当地时区换算（今天、昨天、N天前）。分为**工作历程（Work Log）**（滚动记录最新运维轨迹，连续排障自动承前启后合并 `update_latest`，防止刷屏碎片化）与**关键知识与凭据备忘（Context Knowledge）**（自动沉淀 Token、密码、端口、路径配置等，后续执行直接带入复用，绝不重复向用户索取；支持键值规范化与原子覆盖更新）。
-  - **长短时记忆职责解耦**：会话内摘要专职跟踪当前未完结任务与决策待办，服务器长期记忆专职持久化运维轨迹与配置实体，杜绝冗余重复。
-  - **内敛抽屉式交互**：提供独立「工作备忘与记忆」抽屉面板，工作历程卡片支持两行文本截断、悬停完整 Tooltip 与点击展开；机密凭据默认掩码呈现，支持一键切换明文、快捷复制与删除。
+- **AI 运维助手与服务器记忆**：通过 BYOK 接入标准无状态 Responses API（`store:false`），帮助部署、配置和排查自己的服务器。支持流式回复、快捷诊断提示、终端选区附件、代码复制和命令填入。内置 8 个工具：命令执行、终端读取、环境探测、进程列表、systemctl、Docker、网页读取和用户确认；危险命令仍需确认。
+  - **直接复用已有信息**：保存的配置、知识和完整凭据直接提供给 Agent，不再做来源证明、自动过期、关键词召回或额外脱敏；已经提供的密钥无需重复输入。单条知识值支持 16,384 字符，凭据保留空格、换行及空密码，沿用原有加密存储。界面默认掩码仅影响显示，支持明文查看、复制、编辑与删除。
+  - **可读工作历程与简单后台重试**：LLM 从普通会话生成自然语言工作总结和可复用知识，连续工作可在 30 分钟内合并。会话写入 SQLite，由 UserDBDO Alarm 提炼；断线或实例重建后仍可处理。首次失败后最多再重试三次，成功或耗尽后删除任务。没有独立证据包、执行账本、双队列、回执或通知轮询。详见[上下文与记忆说明](docs/agent-context-memory.md)。
+  - **长任务上下文摘要**：接近模型容量时，通过标准 `/responses` 摘要较早对话，保留近期完整工具交互继续；不依赖 `/responses/compact`。默认上下文/输出预算为 64,000/8,192 Token，可按模型调整；修改后新建 Agent 会话。
+  - **兼容与诊断**：模型能力因服务商而异，仅对明确不支持的可选参数做有界兼容；不执行未完成的工具调用。普通错误简短显示，详细诊断仅在 `DEBUG_MODE=true` 时输出网页终端。模型配置保留自定义下拉选择、同地址已存密钥拉取模型列表及 Base URL 绑定。请求使用 `store:false`，实际留存政策仍需核对服务商。
 - **工程质量门禁**：GitHub Actions 在 `test` 与 `main` 分支部署前依次执行冻结锁文件安装、Worker/前端类型检查、单元与集成测试、可复现前端构建、Playwright 浏览器 E2E 和 axe 无障碍回归；任一环节失败都会阻止部署。
 
 </details>
@@ -167,6 +168,7 @@ flowchart TB
     SSH_DO <-->|"Exec Channel"| AgentCore
     AgentCore <-->|"Work Logs & Knowledge"| User_DO
     AgentCore <-->|"LLM API"| External["外部 LLM 服务"]
+    User_DO <-->|"Alarm 后台记忆提炼"| External
 ```
 
 <a id="quick-start"></a>
@@ -197,16 +199,25 @@ flowchart TB
 
 > **说明**：如需部署 test 环境，可 Fork 后在 `test` 分支上重复上述步骤，创建独立的 Worker（如 `cloudssh-test`）。两个环境的 Durable Objects 数据完全隔离，各自独立。
 
+> **Fork 的 CI 策略**：通过 Cloudflare 面板 / Git 集成部署不需要启用 GitHub Actions，也不需要配置本项目 CI 使用的 Cloudflare Secrets。Workers 部署、GitHub Pages 发布和 SSH 互操作测试的 job 仅在仓库所有者为 `newbietan` 时执行；其他用户的 Fork 中只保留按需运行的上游同步。GitHub 可能显示这些受限工作流的 **Skipped** 记录，但不会分配 runner 执行任务。
+
+##### 版本更新提示
+
+页面会在后台检查官方 `main` 分支的最新稳定版本；连接页的版本标记位于“连接参数”标题后；有新版时，同处显示可忽略的小提示。用户空间和桌面终端仍放在页脚，移动端终端位于“更多”菜单。点击可查看更新日志，升级由部署者自行选择同步仓库并重新部署；不会自动刷新、强制升级或中断当前会话。忽略仅针对该版本，下个新版仍可提示。
+
+检查由 Worker 向固定的官方 GitHub 地址读取公开版本号，不向 GitHub 发送用户凭据或服务器信息。成功检查缓存 6 小时，失败静默退避 15 分钟；网络不可用时不影响正常使用。
+
 ##### 可选：自动同步上游版本
 
-Fork 仓库可以通过内置的 `Sync upstream` GitHub Actions 工作流，定时将本项目 `main` 分支的最新版本同步到自己的 `main` 分支。该功能**默认关闭**，开启后每天北京时间 04:20 检查一次；同步产生的分支更新会由 Cloudflare Git 集成自动构建并部署，无需额外配置部署开关。
+Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流，将本项目 `main` 分支的最新版本同步到自己的 `main` 分支。**手动同步无需配置变量；定时同步默认关闭**，显式开启后每天北京时间 04:20 检查一次。同步产生的分支更新会由 Cloudflare Git 集成自动构建并部署，无需额外配置 CI 部署凭据。
 
 1. 确认 Cloudflare Worker 连接的是你自己的 Fork 仓库，且 Production branch 设置为 `main`，自动构建处于开启状态。
 2. 进入 Fork 仓库的 **Actions** 页面并启用工作流。已有 Fork 如果尚未包含 `Sync upstream`，请先通过 GitHub 的 **Sync fork** 功能手动同步一次。
-3. 进入 **Settings → Secrets and variables → Actions → Variables**，创建 Repository variable：
+3. **按需同步**：进入 **Actions → Sync upstream → Run workflow**，选择 `main` 后手动执行；无需设置仓库变量。
+4. **可选的定时同步**：进入 **Settings → Secrets and variables → Actions → Variables**，创建 Repository variable：
    - Name：`AUTO_SYNC_UPSTREAM`
    - Value：`true`
-4. 如需立即同步，进入 **Actions → Sync upstream → Run workflow** 手动执行；手动执行不要求设置上述变量。
+   - 删除该变量或将其设为 `false` 即可关闭定时同步，手动执行仍然可用。
 
 > **同步说明**：若上游工作流发生改动时，自动同步会失败，请手动完成一次仓库同步即可。
 
@@ -340,9 +351,9 @@ SSH 跳转不需要额外环境变量，但必须启用 GitHub OAuth 并使用�
 ### AI Agent：Responses API 配置与会话
 
 - **协议规范与服务商兼容现状**：
-  - **支持的服务商**：OpenAI 官方（如 `https://api.openai.com/v1`，模型如 `gpt-4o`、`o1`、`o3-mini` 等）、OpenRouter 以及其他遵循标准 Responses API 规范的聚合服务商。
-  - **暂不支持的服务商**：目前仅提供传统 Chat Completions（`/v1/chat/completions`）的平台（如 DeepSeek 官方直连、阿里云百炼 DashScope、月之暗面 Kimi 等），直接请求 `/responses` 将返回 HTTP 404/405。
-  - **免升级建议**：如果您的当前业务环境强依赖仅支持 Chat Completions 的国内模型或网关，**建议暂时维持 v2.5.5 版本**，等待上游服务商适配 Responses 规范。
+  - **通用兼容支持**：主任务与上下文紧凑化仅需服务商支持标准 `/responses` 规范与函数工具调用，原生支持 OpenAI 官方（`gpt-4o`、`o1`、`o3-mini` 等）、Azure OpenAI、OpenRouter 以及各类标准 Responses 中转网关。
+  - **不兼容的接口**：目前仅提供传统 Chat Completions（`/v1/chat/completions`）的接口不可用。
+  - **详细说明**：[本地上下文紧凑化与长期记忆](docs/agent-context-memory.md)。
 - **配置与升级指引**：在 AI 设置中填写 HTTPS API 根地址（如 `https://api.openai.com/v1`）或完整 `/responses` 地址、模型及密钥；旧 `/chat/completions` 地址需手动改为根地址。更换地址必须重新填写密钥。
 
 <a id="development"></a>
@@ -373,16 +384,19 @@ CloudSSH/
 │       ├── sftp-editor-session.ts # SFTP 在线编辑协调器
 │       ├── sftp-helpers.ts        # SFTP 面包屑解析与多维排序
 │       └── snippet-variables.ts   # 命令片段参数占位符提取与替换
-├── docs/                   # GitHub Pages 静态资源
+├── docs/                   # 专题文档与 GitHub Pages 静态资源
 │   └── theme-editor/       # 可视化主题编辑器
 ├── scripts/                # 构建脚本
-├── tests/                  # Vitest 单元/集成 + Playwright E2E 与 axe 回归（build/ e2e/ ssh/ worker/）
-├── .github/workflows/      # CI/CD 自动部署配置（deploy / github-pages / sync-upstream）
+├── tests/                  # Vitest 单元/集成 + Playwright E2E 与 axe 回归
+│   └── interop/            # 真实 SSH 互操作测试，集中收纳 Go 工作区与 gateway/ 模块
+├── .github/workflows/      # CI/CD（deploy / github-pages / ssh-interop / sync-upstream）
 ├── biome.json              # 代码格式与 lint 约定
 ├── playwright.config.ts    # 浏览器 E2E 测试配置
 ├── pnpm-workspace.yaml     # pnpm 工作区配置
 └── wrangler.toml           # Cloudflare 部署配置
 ```
+
+项目级配置（`biome.json`、`tsconfig.json`、`vitest.config.ts`、`playwright.config.ts`、`wrangler.toml` 等）保留在根目录，方便工具自动发现。Go 代码仅用于 [SSH 互操作测试](tests/interop/README.md)，工作区及依赖文件统一位于 `tests/interop/`，不参与生产构建或部署；常规开发与部署不需要安装 Go。
 
 ### 本地开发
 

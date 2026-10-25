@@ -5,6 +5,7 @@ import { marked, type Tokens } from 'marked';
 import {
   formatTimestampWithRelative,
   isSensitiveKeyOrValue,
+  KNOWLEDGE_VALUE_MAX_LENGTH,
   normalizeKnowledgeInput,
   type ServerKnowledgeItem,
   type UnifiedServerMemory,
@@ -15,6 +16,7 @@ import { getLocale, onLocaleChange, t, translateDocument } from '../i18n';
 import { confirmAction, notify } from '../ui-feedback';
 import { getTerminalFillCommand, normalizeCodeLanguage } from './code-actions';
 import { responseErrorMessage } from './response-errors';
+import { agentSessionDraftKey } from './session-draft';
 import {
   buildTerminalSelectionMessage,
   createTerminalSelectionContext,
@@ -80,6 +82,7 @@ export class AgentPanel {
   private inputEl: HTMLTextAreaElement | null = null;
   private sendBtn: HTMLElement | null = null;
   private isVisible: boolean = false;
+  private disposed = false;
   private beforeShowHandler: (() => void) | null = null;
   private isAgentRunning: boolean = false;
   private activeRequestId: string | null = null;
@@ -102,6 +105,7 @@ export class AgentPanel {
   private localeCleanup: (() => void) | null = null;
   private pendingTerminalSelection: TerminalSelectionContext | null = null;
   private agentMode: AgentExecutionMode = 'interactive';
+  private isInputComposing: boolean = false;
   private autoConfirmTimer: number | null = null;
   private autoConfirmInterval: number | null = null;
   private pendingConfirmation: {
@@ -141,7 +145,8 @@ export class AgentPanel {
   constructor(
     private parentEl: HTMLElement = document.body,
     private isLoggedIn: boolean = false,
-    private serverId?: number
+    private serverId?: number,
+    private readonly githubId?: number
   ) {
     try {
       const savedMode = localStorage.getItem(AGENT_MODE_STORAGE_KEY);
@@ -230,7 +235,7 @@ export class AgentPanel {
   }
 
   render(): void {
-    if (this.panelEl) return;
+    if (this.panelEl || this.disposed) return;
 
     this.panelEl = document.createElement('div');
     this.panelEl.id = 'agent-panel';
@@ -426,7 +431,22 @@ export class AgentPanel {
       }
     });
 
+    this.inputEl?.addEventListener('compositionstart', () => {
+      this.isInputComposing = true;
+    });
+    this.inputEl?.addEventListener('compositionend', () => {
+      this.isInputComposing = false;
+    });
+    this.inputEl?.addEventListener('blur', () => {
+      this.isInputComposing = false;
+    });
+
     this.inputEl?.addEventListener('keydown', (e) => {
+      // Safari can report isComposing=false on the IME confirmation Enter.
+      if (e.isComposing || this.isInputComposing || e.keyCode === 229) {
+        if (e.key === 'Escape') e.stopPropagation();
+        return;
+      }
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         this.handleSend();
@@ -524,6 +544,7 @@ export class AgentPanel {
   }
 
   handleAgentFrame(msg: any): void {
+    if (this.disposed) return;
     // Correlation is local UI state, never an authentication credential.
     if (msg.requestId && msg.requestId !== this.activeRequestId) return;
     if (msg.requestId && !this.isAgentRunning &&
@@ -573,9 +594,6 @@ export class AgentPanel {
           this.updateInputState();
         }
         break;
-      case 'progress_extend':
-        this.showProgressExtend(t('agent.progressContinue'), msg.currentIteration, msg.newMax, t('agent.progressActive'));
-        break;
       case 'reset_done':
         if (this.isAgentRunning) break;
         this.activeRequestId = null;
@@ -585,19 +603,15 @@ export class AgentPanel {
       case 'context_status':
         if (msg.compacted && msg.checkpointSource === 'local') {
           notify(t('agent.contextLocalFallback'), { variant: 'warning' });
-        } else if (msg.recovering === true) {
-          notify(t('agent.contextRecovering'), { variant: 'info' });
+        } else if (msg.compacting === true) {
+          notify(t('agent.contextCompacting'), { variant: 'info' });
         }
         break;
       case 'memory_status':
-        if (msg.code === 'memory_failed') {
-          // Auxiliary failures must not remove a newer task's streaming message.
-          notify(t('agent.memoryFailure') + '\n' + responseErrorMessage(msg.errorCode, msg.status, msg.diagnostics),
-            { variant: 'warning' });
-        }
+        notify(t('agent.memoryFailure'), { variant: 'warning' });
         break;
       case 'memory_updated':
-        if (!this.isAgentRunning) this.clearSessionDraft();
+        // Cache invalidation is not task completion: a late log write must preserve interrupted drafts.
         if (this.serverId) {
           void this.fetchServerMemory();
         }
@@ -1124,32 +1138,6 @@ export class AgentPanel {
     this.appendMessage('error', message || t('feedback.danger'));
   }
 
-  private showProgressExtend(
-    message: string,
-    currentIteration: number,
-    newMax: number,
-    reason: string
-  ): void {
-    const el = document.createElement('div');
-    el.className =
-      'agent-progress-extend p-2 rounded border border-[var(--accent)] bg-[var(--accent-bg)] text-[11px]';
-    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
-    el.innerHTML = `
-      <div class="flex items-center gap-2">
-        <span class="material-symbols-outlined text-[14px]" style="color:var(--accent);font-variation-settings:'FILL' 1;">trending_up</span>
-        <span class="font-bold text-[var(--accent)]">${t('agent.progressTitle')}</span>
-      </div>
-      <div class="agent-progress-detail mt-1">
-        ${escapeHtml(t('agent.progressCurrent', { message, current: currentIteration, max: newMax }))}
-      </div>
-      <div class="agent-progress-detail mt-1 text-[11px]">
-        ${escapeHtml(t('agent.progressReason', { reason }))}
-      </div>
-    `;
-    this.messagesEl?.appendChild(el);
-    this.scrollToBottom();
-  }
-
   private showConfirmDialog(command: string, reason: string, confirmationId: unknown): void {
     if (typeof confirmationId !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/.test(confirmationId)) {
       // Fail closed for legacy/malformed requests; never send an unbound approval.
@@ -1522,7 +1510,22 @@ export class AgentPanel {
 
     saveBtn.addEventListener('click', saveAndSubmit);
 
+    let isInlineComposing = false;
+    textarea.addEventListener('compositionstart', () => {
+      isInlineComposing = true;
+    });
+    textarea.addEventListener('compositionend', () => {
+      isInlineComposing = false;
+    });
+    textarea.addEventListener('blur', () => {
+      isInlineComposing = false;
+    });
+
     textarea.addEventListener('keydown', (e) => {
+      if (e.isComposing || isInlineComposing || e.keyCode === 229) {
+        if (e.key === 'Escape') e.stopPropagation();
+        return;
+      }
       if (e.key === 'Escape') {
         e.preventDefault();
         cancel();
@@ -1802,19 +1805,34 @@ export class AgentPanel {
     this.panelEl?.querySelector('#agent-resume-task-chip')?.remove();
   }
 
+  private get sessionDraftKey(): string | null {
+    return this.isLoggedIn && !this.disposed
+      ? agentSessionDraftKey(this.githubId, this.serverId)
+      : null;
+  }
+
   private loadSessionDraft(): void {
-    if (!this.serverId || !this.messagesEl) return;
+    const key = this.sessionDraftKey;
+    if (!key || !this.messagesEl) return;
     try {
-      const raw = localStorage.getItem(`cloudssh_agent_draft_${this.serverId}`);
+      const raw = localStorage.getItem(key);
       if (!raw) return;
       const draft = JSON.parse(raw);
-      if (!draft || !Array.isArray(draft.messages) || draft.messages.length === 0) return;
-      // 仅恢复 30 分钟内的中断会话；已完成或过期会话立即清理，避免与云端提炼记忆重复
+      // Never infer ownership from the current login or a colliding local server ID.
       if (
-        !draft.wasInterrupted ||
-        Date.now() - Number(draft.updatedAt || 0) > SESSION_DRAFT_TTL_MS
+        !draft || draft.githubId !== this.githubId || draft.serverId !== this.serverId ||
+        !Array.isArray(draft.messages) || draft.messages.length === 0
       ) {
-        localStorage.removeItem(`cloudssh_agent_draft_${this.serverId}`);
+        localStorage.removeItem(key);
+        return;
+      }
+      // 仅恢复 30 分钟内的中断会话；已完成或过期会话立即清理，避免与云端提炼记忆重复
+      const age = Date.now() - draft.updatedAt;
+      if (
+        draft.wasInterrupted !== true || !Number.isFinite(draft.updatedAt) ||
+        age < 0 || age > SESSION_DRAFT_TTL_MS
+      ) {
+        localStorage.removeItem(key);
         return;
       }
       this.sessionMessages = [...draft.messages];
@@ -1834,33 +1852,39 @@ export class AgentPanel {
   }
 
   private saveSessionDraft(isInterrupted: boolean): void {
-    if (!this.serverId) return;
-    // 任务正常完成或无消息时，立即删除本地暂存草稿，由云端记忆（WorkLog & Knowledge）全权接管
-    if (!isInterrupted || this.sessionMessages.length === 0) {
-      localStorage.removeItem(`cloudssh_agent_draft_${this.serverId}`);
-      return;
-    }
+    const key = this.sessionDraftKey;
+    if (!key) return;
     try {
+      // 任务正常完成或无消息时，立即删除本地暂存草稿，由云端记忆（WorkLog & Knowledge）全权接管
+      if (!isInterrupted || this.sessionMessages.length === 0) {
+        localStorage.removeItem(key);
+        return;
+      }
       const draft = {
+        githubId: this.githubId,
         serverId: this.serverId,
         updatedAt: Date.now(),
         messages: this.sessionMessages.slice(-20),
         wasInterrupted: true,
       };
-      localStorage.setItem(`cloudssh_agent_draft_${this.serverId}`, JSON.stringify(draft));
+      localStorage.setItem(key, JSON.stringify(draft));
     } catch {
-      /* ignore */
+      /* ignore unavailable storage */
     }
   }
 
   private clearSessionDraft(): void {
-    if (this.serverId) {
-      localStorage.removeItem(`cloudssh_agent_draft_${this.serverId}`);
+    const key = this.sessionDraftKey;
+    try {
+      if (key) localStorage.removeItem(key);
+    } catch {
+      /* ignore unavailable storage */
     }
     this.removeResumeChip();
   }
 
   dispose(): void {
+    this.disposed = true;
     this.rejectPendingConfirmation(false);
     this.clearAutoConfirmTimers();
     this.localeCleanup?.();
@@ -1871,6 +1895,7 @@ export class AgentPanel {
     this.messagesEl = null;
     this.contextEl = null;
     this.inputEl = null;
+    this.isInputComposing = false;
     this.sendBtn = null;
     this.memoryDrawerEl = null;
     this.memoryTabWorkLogBtn = null;
@@ -2405,7 +2430,7 @@ export class AgentPanel {
           <input id="agent-knowledge-key" type="text" placeholder="${t('agent.knowledgeKey')}" class="terminal-input flex-1 text-xs py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg)] font-code text-primary" required maxlength="64" />
         </div>
         <div>
-          <textarea id="agent-knowledge-value" rows="2" placeholder="${t('agent.knowledgeValue')}" class="terminal-input w-full text-xs py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg)] font-code resize-none text-primary" required maxlength="512"></textarea>
+          <textarea id="agent-knowledge-value" rows="2" placeholder="${t('agent.knowledgeValue')}" class="terminal-input w-full text-xs py-1 px-2 rounded border border-[var(--border)] bg-[var(--bg)] font-code resize-none text-primary" required maxlength="${KNOWLEDGE_VALUE_MAX_LENGTH}"></textarea>
         </div>
         <div class="flex justify-end gap-2">
           <button type="button" id="agent-knowledge-cancel-btn" class="px-2 py-0.5 text-xs text-muted hover:text-primary cursor-pointer">${t('agent.memoryCancel')}</button>

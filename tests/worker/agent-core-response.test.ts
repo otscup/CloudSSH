@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentCore } from '../../src/worker/agent/core';
 import { TerminalContext } from '../../src/worker/agent/terminal-context';
-import { aiConfig, checkpoint, functionCall, reply, responseObject, sse } from './agent/responses-fixtures';
+import { aiConfig, functionCall, reply, responseObject, sse } from './agent/responses-fixtures';
 
 // Protocol fixtures stub DNS; the real outbound guard is covered in responses-ssrf.test.ts.
 vi.mock('../../src/worker/agent/ssrf', () => ({ validateBaseUrlWithDNS: async () => ({ valid: true }) }));
@@ -14,6 +14,13 @@ function setup(options: any = {}) {
   const agent = new AgentCore(terminal, frame => frames.push(frame), async () => options.aiConfig || aiConfig,
     options.exec || exec, async () => true, options.config, options.memory, promise => waits.push(promise));
   return { agent, frames, terminal, exec, waits };
+}
+function seedOlderHistory(agent: AgentCore) {
+  const context = (agent as any).context;
+  for (let i = 0; i < 4; i++) {
+    context.beginTurn(`Earlier request ${i}`);
+    context.accept({ ...responseObject(`old_${i}`, 'Earlier observation'), text: 'Earlier observation', calls: [] }, context.buildInput());
+  }
 }
 afterEach(() => vi.restoreAllMocks());
 
@@ -51,7 +58,7 @@ describe('AgentCore Responses delivery and context', () => {
     expect(requests[0].instructions).not.toContain('terminal unchanged');
   });
 
-  it('replays opaque reasoning and assistant phases across tool and user turns without exposing them as evidence', async () => {
+  it('replays opaque reasoning and assistant phases across tool and user turns without putting them in saved conversation text', async () => {
     const { agent, frames, exec } = setup();
     const requests: any[] = [];
     const reasoning = { type: 'reasoning', id: 'rs_native', summary: [], status: 'completed',
@@ -73,7 +80,7 @@ describe('AgentCore Responses delivery and context', () => {
     expect(requests[2].input).toContainEqual(expect.objectContaining({ phase: 'final_answer' }));
     expect(exec).toHaveBeenCalledTimes(2); // one environment probe and one actual command
     expect(JSON.stringify(frames)).not.toMatch(/OPAQUE_STATE|PRIVATE_REASONING/);
-    expect(JSON.stringify((agent as any).context.records)).not.toMatch(/OPAQUE_STATE|PRIVATE_REASONING/);
+    expect((agent as any).context.formatItemsForCompaction()).not.toMatch(/OPAQUE_STATE|PRIVATE_REASONING/);
   });
 
   it('applies model budgets and requires a fresh chat when they change', async () => {
@@ -88,23 +95,23 @@ describe('AgentCore Responses delivery and context', () => {
     expect(frames.find(frame => frame.code === 'responses_config_changed')).toBeTruthy();
   });
 
-  it('schema capability fallback still rejects invalid checkpoints and preserves tool history', async () => {
+  it('compacts with summarization at budget boundary and preserves tool history on continuation error', async () => {
     const { agent, frames } = setup();
+    seedOlderHistory(agent);
     let requests = 0;
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       requests++;
       const body = JSON.parse(init!.body as string);
-      if (body.text) return new Response(JSON.stringify({ error: { code: 'unsupported_parameter', param: 'text.format' } }), { status: 400 });
-      if (!body.stream) return new Response(JSON.stringify(responseObject('resp_bad_checkpoint', '{}')));
+      if (!body.stream) return Response.json(responseObject('resp_cp', 'Summary.'));
+      if (requests === 3) return new Response('{"error":{"code":"invalid_api_key"}}', { status: 401 });
       const response = responseObject('resp_first', '', [functionCall()]);
       response.usage.input_tokens = 55_000;
       return sse([{ type: 'response.completed', response }]);
     });
     await agent.handleAgentStart('1', 'Inspect');
     expect(requests).toBe(3);
-    expect(frames.find(frame => frame.code === 'responses_schema')).toMatchObject({ diagnostics: { purpose: 'checkpoint' } });
-    expect((agent as any).context.pending[0].type).toBe('function_call_output');
-    expect((agent as any).context.history).toContainEqual(expect.objectContaining({ type: 'function_call' }));
+    expect(frames.find(frame => frame.subType === 'error')?.code).toBe('responses_http');
+    expect(JSON.stringify((agent as any).context.buildInput())).toContain('Summary.');
   });
 
   it('appends changed terminal observations without changing the instruction prefix', async () => {
@@ -216,12 +223,13 @@ describe('AgentCore Responses delivery and context', () => {
     expect(requests.at(-1).input.filter((item: any) => item.type === 'function_call_output')).toHaveLength(8);
   });
 
-  it('uses a structured checkpoint and fresh continuation at the budget boundary without orphan outputs', async () => {
+  it('uses application-level compaction at the budget boundary without orphan outputs', async () => {
     const { agent } = setup();
+    seedOlderHistory(agent);
     const requests: any[] = [];
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const body = JSON.parse(init?.body as string); requests.push(body);
-      if (!body.stream) return new Response(JSON.stringify(responseObject('resp_checkpoint', JSON.stringify(checkpoint), [], body)));
+      if (!body.stream) return Response.json(responseObject('resp_cp', 'Nginx inspected.'));
       if (requests.length === 1) {
         const response = responseObject('resp_1', '', [functionCall()], body);
         response.usage.input_tokens = 55_000; response.usage.total_tokens = 55_020;
@@ -231,51 +239,45 @@ describe('AgentCore Responses delivery and context', () => {
     });
     await agent.handleAgentStart('1', '检查 nginx');
     expect(requests).toHaveLength(3);
-    expect(requests[1]).toMatchObject({ store: false, stream: false, text: { format: { name: 'agent_checkpoint' } } });
+    expect(requests[1].instructions).toContain('紧凑总结');
+    expect(requests[1].stream).toBe(false);
+    expect(requests[1].max_output_tokens).toBe(1500);
     expect(requests[1]).not.toHaveProperty('previous_response_id');
     expect(requests[2]).not.toHaveProperty('previous_response_id');
-    expect(requests[2].input.some((item: any) => item.type === 'function_call_output')).toBe(false);
-    expect(JSON.stringify(requests[2].input)).toContain('free -m completed');
+    const calls = requests[2].input.filter((item: any) => item.type === 'function_call').map((item: any) => item.call_id);
+    const outputs = requests[2].input.filter((item: any) => item.type === 'function_call_output').map((item: any) => item.call_id);
+    expect(outputs).toEqual(calls);
+    expect(outputs).toContain('call_1');
+    expect(JSON.stringify(requests[2].input)).toContain('Nginx inspected.');
   });
 
-  it('fails closed if a checkpoint is invalid and does not abandon local history', async () => {
-    const { agent, frames } = setup();
-    let step = 0;
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
-      const body = JSON.parse(init?.body as string);
-      if (!body.stream) return new Response(JSON.stringify(responseObject('aux', '{}', [], body)));
-      step++;
-      const response = responseObject('resp_1', '', [functionCall()], body);
-      response.usage.input_tokens = 55_000; response.usage.total_tokens = 55_020;
-      return sse([{ type: 'response.completed', response }]);
-    });
-    await agent.handleAgentStart('1', '检查');
-    expect(step).toBe(1);
-    expect((agent as any).context.history).toContainEqual(expect.objectContaining({ type: 'function_call', call_id: 'call_1' }));
-    expect((agent as any).context.pending[0].type).toBe('function_call_output');
-    expect(frames.find(frame => frame.subType === 'error')?.code).toBe('responses_schema');
-  });
-
-  it('distills interrupted work through a separate structured Responses request and waitUntil', async () => {
+  it('submits interrupted conversation for background summarization without a separate evidence journal', async () => {
     let agent: AgentCore;
-    const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [] }), saveBatchMemory: vi.fn(async () => {}) };
+    const memory = { fetchUnifiedMemory: async () => ({ workLogs: [], knowledge: [], revision: 0 }),
+      enqueueMemory: vi.fn(async (_task: unknown) => {}) };
     const exec = vi.fn(async (command: string) => {
       if (!command.includes('PWD:$(pwd)')) agent.agentAbort('connection_closed');
       return { stdout: 'Listening on port 8080', stderr: '', exitCode: 0 };
     });
     const created = setup({ exec, memory }); agent = created.agent;
-    const requests: any[] = [];
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
-      const body = JSON.parse(init?.body as string); requests.push(body);
-      if (!body.stream) return new Response(JSON.stringify(responseObject('memory', JSON.stringify({ workLog: { mode: 'create', title: '检查端口', summary: '执行已中断，需核查状态' }, knowledge: [{ action: 'set', category: 'config', key: 'service_port', value: '8080' }] }), [], body)));
-      return reply('resp_1', '', [functionCall()], body);
-    });
-    await agent.handleAgentStart('1', '检查端口');
-    await Promise.all(created.waits);
-    expect(memory.saveBatchMemory).toHaveBeenCalledWith(expect.objectContaining({ workLog: expect.objectContaining({ title: '[已中断] 检查端口' }) }));
-    expect(requests[1]).toMatchObject({ store: false, stream: false, text: { format: { name: 'server_memory' } } });
-    expect(requests[1]).not.toHaveProperty('previous_response_id');
-    expect(requests[1]).not.toHaveProperty('tools');
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('inspect', '', [functionCall()]));
+    await agent.handleAgentStart('1', '检查端口'); await Promise.all(created.waits);
+    expect(memory.enqueueMemory).toHaveBeenCalledTimes(1);
+    expect(memory.enqueueMemory.mock.calls[0][0]).toMatchObject({ goal: '检查端口', conversation: expect.stringContaining('8080') });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('provides a previously saved full key to a later deployment task without relevance filtering', async () => {
+    const key = 'deployment-secret-' + 'X'.repeat(1000);
+    const priorKeys = Array.from({ length: 4 }, (_, i) => ({ id: i + 1, user_id: 1, server_id: 1,
+      category: 'credential', key: `other_key_${i}`, value: 'K'.repeat(15_000), created_at: 1, updated_at: 1 }));
+    const memory = { fetchUnifiedMemory: async () => ({ revision: 1, workLogs: [], knowledge: [...priorKeys, { id: 5, user_id: 1, server_id: 1,
+      category: 'credential', key: 'service_api_key', value: key, created_at: 1, updated_at: 1 }] }), enqueueMemory: vi.fn(async () => {}) };
+    const { agent, waits } = setup({ memory });
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(reply('done', 'Deployment completed.'));
+    await agent.handleAgentStart('1', '部署服务'); await Promise.all(waits);
+    expect(String(fetch.mock.calls[0][1]?.body)).toContain(key);
+    expect(memory.enqueueMemory).toHaveBeenCalledTimes(1);
   });
 
   it('auto-stitches incomplete response with partial text and seamlessly finishes', async () => {

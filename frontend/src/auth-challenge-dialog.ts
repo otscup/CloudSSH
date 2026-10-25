@@ -94,17 +94,20 @@ export function normalizeAuthChallengeMessage(value: unknown): AuthChallengeMess
     });
   }
 
+  const passwordFactor = value.method === 'password';
+  if (passwordFactor && (prompts.length !== 1 || prompts[0].echo)) return null;
+  if (passwordFactor) prompts[0].text = t('common.password');
   return {
     type: 'auth_challenge',
     id: value.id,
-    name: sanitizeAuthChallengeText(value.name, MAX_CHALLENGE_NAME_LENGTH),
-    instruction: sanitizeAuthChallengeText(
+    name: passwordFactor ? t('common.password') : sanitizeAuthChallengeText(value.name, MAX_CHALLENGE_NAME_LENGTH),
+    instruction: passwordFactor ? t('authChallenge.passwordFactor') : sanitizeAuthChallengeText(
       value.instruction,
       MAX_CHALLENGE_INSTRUCTION_LENGTH,
       true
     ),
     prompts,
-    canUseStoredPassword: value.canUseStoredPassword === true,
+    canUseStoredPassword: !passwordFactor && value.canUseStoredPassword === true,
   };
 }
 

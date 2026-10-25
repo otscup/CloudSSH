@@ -83,3 +83,27 @@ test('none 被拒绝后不弹交互认证，也不自动重连', async ({ page }
   expect(connections).toBe(1);
   await expect(page.locator('.auth-challenge-dialog')).toHaveCount(0);
 });
+
+for (const event of ['algorithm_error', 'host_key_invalid']) {
+  test(`${event} 终止握手后即使异常关闭也不自动重连`, async ({ page }) => {
+    let connections = 0;
+    await page.routeWebSocket('**/api/ssh*', (socket) => {
+      connections++;
+      socket.onMessage((data) => {
+        if (typeof data !== 'string' || !JSON.parse(data).host) return;
+        socket.send(JSON.stringify({ type: 'error', event, message: 'handshake rejected',
+          params: { message: 'No common host key algorithm' } }));
+        socket.close({ code: 1011 });
+      });
+    });
+    await page.goto('/?lang=en-US');
+    await page.locator('#host').fill('ssh.example.com');
+    await page.locator('#username').fill('token-user');
+    await page.locator('#auth-tab-none').click();
+    await page.locator('#connect-btn').click();
+    await expect.poll(() => connections).toBe(1);
+    await page.waitForTimeout(1600);
+    expect(connections).toBe(1);
+    await expect(page.locator('.auth-challenge-dialog')).toHaveCount(0);
+  });
+}

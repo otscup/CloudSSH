@@ -5,6 +5,7 @@ import { onLocaleChange, t, translateDocument } from './i18n';
 import { openAdminHashGeneratorDialog } from './admin-hash-generator';
 import { loadKnownFingerprint } from './known-hosts';
 import { parsePort } from './port';
+import { preparePrivateKey } from './private-key-import';
 import { stretchAdminPassword } from './password-stretch';
 import { populateRegionSelect } from './regions';
 import type { TabManager } from './tab-manager';
@@ -848,6 +849,8 @@ export class ConnectionForm {
   }
 
   private async handleConnect(): Promise<void> {
+    const connectButton = document.getElementById('connect-btn') as HTMLButtonElement;
+    if (connectButton.disabled) return;
     const hostInput = (document.getElementById('host') as HTMLInputElement).value;
     const host = hostInput.replace(/^\[|\]$/g, '').trim();
     const portInput = document.getElementById('port') as HTMLInputElement;
@@ -856,9 +859,9 @@ export class ConnectionForm {
     const password = (document.getElementById('password') as HTMLInputElement).value;
     const privateKey = (document.getElementById('private-key') as HTMLTextAreaElement).value;
     const selectedPassword = this.authMode === 'password' ? password : undefined;
-    const selectedPrivateKey = this.authMode === 'key' ? privateKey : undefined;
+    let selectedPrivateKey = this.authMode === 'key' ? privateKey : undefined;
     const authMethod = this.authMode === 'key' ? 'publickey' : this.authMode;
-    const remember = (document.getElementById('remember-me') as HTMLInputElement).checked;
+    let remember = (document.getElementById('remember-me') as HTMLInputElement).checked;
     // 匿名路径区域选择（仅作为 manual override；系统不会对此路径自动推断）
     const anonRegionSelect = document.getElementById('anon-region') as HTMLSelectElement | null;
     const regionValue = anonRegionSelect ? anonRegionSelect.value : '';
@@ -900,6 +903,25 @@ export class ConnectionForm {
         .getElementById('turnstile-container')
         ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
+    }
+
+    if (selectedPrivateKey) {
+      connectButton.disabled = true;
+      try {
+        const prepared = await preparePrivateKey(selectedPrivateKey, false);
+        if (!prepared || this.authMode !== 'key' ||
+            document.getElementById('auth-section')!.classList.contains('hidden') ||
+            (document.getElementById('host') as HTMLInputElement).value !== hostInput ||
+            (document.getElementById('username') as HTMLInputElement).value !== username ||
+            (document.getElementById('private-key') as HTMLTextAreaElement).value !== privateKey ||
+            parsePort(portInput.value) !== port) return;
+        selectedPrivateKey = prepared.key;
+        if (prepared.unlocked) {
+          remember = false;
+          (document.getElementById('remember-me') as HTMLInputElement).checked = false;
+          notify(t('auth.keyUnlockTransient'), { variant: 'info' });
+        }
+      } finally { connectButton.disabled = false; }
     }
 
     // 保存连接历史与凭据

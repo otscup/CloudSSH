@@ -6,6 +6,38 @@ export const SUPPORTED_KEX_ALGORITHMS = [
   KEX_ALGORITHM_ECDH_NISTP256,
 ];
 
+export const ED25519_HOST_CERTIFICATE_ALGORITHM = 'ssh-ed25519-cert-v01@openssh.com';
+
+// RSA certificate negotiation names select the signature hash, while the wire key
+// remains ssh-rsa-cert-v01@openssh.com. Never offer its legacy SHA-1 negotiation name.
+export const HOST_CERTIFICATE_ALGORITHMS: Record<string, { keyType: string; signatureType: string }> = {
+  [ED25519_HOST_CERTIFICATE_ALGORITHM]: {
+    keyType: ED25519_HOST_CERTIFICATE_ALGORITHM, signatureType: 'ssh-ed25519',
+  },
+  'rsa-sha2-512-cert-v01@openssh.com': {
+    keyType: 'ssh-rsa-cert-v01@openssh.com', signatureType: 'rsa-sha2-512',
+  },
+  'rsa-sha2-256-cert-v01@openssh.com': {
+    keyType: 'ssh-rsa-cert-v01@openssh.com', signatureType: 'rsa-sha2-256',
+  },
+  ...Object.fromEntries(['nistp256', 'nistp384', 'nistp521'].map((curve) => [
+    `ecdsa-sha2-${curve}-cert-v01@openssh.com`, {
+      keyType: `ecdsa-sha2-${curve}-cert-v01@openssh.com`, signatureType: `ecdsa-sha2-${curve}`,
+    },
+  ])),
+};
+
+export const SUPPORTED_HOST_KEY_ALGORITHMS = [
+  'ssh-ed25519',
+  ...Object.keys(HOST_CERTIFICATE_ALGORITHMS),
+  'ecdsa-sha2-nistp256',
+  'ecdsa-sha2-nistp384',
+  'ecdsa-sha2-nistp521',
+  'rsa-sha2-512',
+  'rsa-sha2-256',
+  'ssh-rsa',
+];
+
 export const SUPPORTED_ENCRYPTION_ALGORITHMS = [
   'aes128-gcm@openssh.com',
   'aes256-gcm@openssh.com',

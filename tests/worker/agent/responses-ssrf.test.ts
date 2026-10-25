@@ -8,7 +8,8 @@ afterEach(() => vi.restoreAllMocks());
 describe('Responses credential boundary uses real SSRF validation', () => {
   it.each(['localhost', '127.0.0.1', '169.254.169.254', '[::1]'])('never fetches a private/metadata literal (%s)', async host => {
     const fetch = vi.spyOn(globalThis, 'fetch');
-    await expect(new ResponsesClient({ ...aiConfig, base_url: `https://${host}/v1` }).create(request, new AbortController().signal)).rejects.toMatchObject({ code: 'responses_address' });
+    const client = new ResponsesClient({ ...aiConfig, base_url: `https://${host}/v1` });
+    await expect(client.create(request, new AbortController().signal)).rejects.toMatchObject({ code: 'responses_address' });
     expect(fetch).not.toHaveBeenCalled();
   });
 

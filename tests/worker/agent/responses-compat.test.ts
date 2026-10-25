@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ResponsesClient } from '../../../src/worker/agent/responses-client';
 import { retryAfterMs } from '../../../src/worker/agent/responses-errors';
 import { AGENT_TOOLS } from '../../../src/worker/agent/tools';
-import { CHECKPOINT_FORMAT } from '../../../src/worker/agent/prompt';
-import { AgentMemoryManager } from '../../../src/worker/agent/memory';
+import { MEMORY_FORMAT } from '../../../src/worker/agent/prompt';
+import { distillMemory } from '../../../src/worker/agent/memory';
 import { aiConfig, functionCall, responseObject, sse } from './responses-fixtures';
 
 vi.mock('../../../src/worker/agent/ssrf', () => ({ validateBaseUrlWithDNS: async () => ({ valid: true }) }));
@@ -120,12 +120,12 @@ describe('Bounded, explicit capability fallback', () => {
   it('falls back from unsupported JSON schema guidance without abandoning local validation', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(unsupported('text.format.type'))
       .mockResolvedValueOnce(new Response(JSON.stringify(responseObject('resp_aux', '{}'))));
-    const result = await new ResponsesClient(aiConfig).create({ ...request, purpose: 'checkpoint',
-      tools: undefined, stream: false, text: { format: CHECKPOINT_FORMAT } }, signal());
+    const result = await new ResponsesClient(aiConfig).create({ ...request, purpose: 'memory',
+      tools: undefined, stream: false, text: { format: MEMORY_FORMAT } }, signal());
     expect(result.text).toBe('{}'); // Caller must validate; no fake success/schema repair here.
     const next = JSON.parse(fetch.mock.calls[1][1]!.body as string);
     expect(next).not.toHaveProperty('text');
-    expect(next.instructions).toContain(JSON.stringify(CHECKPOINT_FORMAT.schema));
+    expect(next.instructions).toContain(JSON.stringify(MEMORY_FORMAT.schema));
     expect(next.instructions).toContain(request.instructions);
     expect(next.store).toBe(false);
   });
@@ -178,28 +178,17 @@ describe('Bounded, explicit capability fallback', () => {
 });
 
 describe('Auxiliary memory compatibility', () => {
-  it.each([true, false])('keeps local memory validation after schema fallback (valid=%s)', async valid => {
-    const memory = { workLogs: [], knowledge: [], revision: 4 };
-    const provider = { fetchUnifiedMemory: vi.fn(async () => memory), saveBatchMemory: vi.fn(async () => {}) };
-    const frames: any[] = [];
-    const manager = new AgentMemoryManager(provider, () => 1, frame => frames.push(frame));
-    const output = valid ? JSON.stringify({ workLog: { mode: 'create', title: 'Inspection', summary: 'Inspected Linux' }, knowledge: [] }) : '{}';
+  it('can summarize memory when a gateway ignores the optional JSON Schema parameter', async () => {
+    const output = JSON.stringify({ workLog: { mode: 'create', title: 'Inspect Linux', summary: 'Linux inspected' },
+      knowledge: [{ action: 'set', category: 'config', key: 'os_name', value: 'Linux' }] });
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(unsupported('text.format'))
-      .mockImplementation(async () => new Response(JSON.stringify(responseObject('resp_memory', output))));
-    await manager.enqueue({ records: [{ role: 'user', content: 'Inspect Linux' }, { role: 'assistant', content: 'Inspected Linux' }],
-      memory, goal: 'Inspect Linux', config: { ...aiConfig, max_output_tokens: 1024 }, locale: 'en-US', timezone: 'UTC',
-      interrupted: false, iteration: 1, epoch: 1, sessionId: 'session-test' });
+      .mockImplementation(async () => Response.json(responseObject('memory', output)));
+    const result = await distillMemory({ ...aiConfig, max_output_tokens: 1024 },
+      { taskId: 'task-1', goal: 'Inspect Linux', conversation: 'Linux inspected', locale: 'en-US', timezone: 'UTC' },
+      { workLogs: [], knowledge: [], revision: 4 }, signal());
+    expect(result).toMatchObject({ expectedRevision: 4, knowledge: [{ key: 'os_name', value: 'Linux' }] });
+    expect(fetch).toHaveBeenCalledTimes(2);
     expect(JSON.parse(fetch.mock.calls[1][1]!.body as string).max_output_tokens).toBe(1024);
-    if (valid) {
-      expect(provider.saveBatchMemory).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 4, workLog: expect.objectContaining({ title: 'Inspection' }) }));
-      expect(frames).toContainEqual({ subType: 'memory_updated' });
-    } else {
-      expect(provider.saveBatchMemory).not.toHaveBeenCalled();
-      expect(fetch).toHaveBeenCalledTimes(3); // capability correction + two completed generations
-      expect(JSON.parse(fetch.mock.calls[2][1]!.body as string)).not.toHaveProperty('text');
-      expect(frames).toContainEqual(expect.objectContaining({ code: 'memory_failed', errorCode: 'responses_schema',
-        diagnostics: { purpose: 'memory', stage: 'parse', parameter: 'text.format', requestId: expect.any(String) } }));
-    }
   });
 });
 
@@ -260,7 +249,7 @@ describe('Safe diagnostics and model budgets', () => {
   it('rejects an oversized context locally before making any request', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch');
     await expect(new ResponsesClient({ ...aiConfig, context_window: 8192, max_output_tokens: 1024 })
-      .create({ ...request, input: [{ role: 'user', content: 'x'.repeat(8192) }] }, signal()))
+      .create({ ...request, input: [{ role: 'user', content: 'x'.repeat(24_000) }] }, signal()))
       .rejects.toMatchObject({ code: 'responses_budget' });
     expect(fetch).not.toHaveBeenCalled();
   });

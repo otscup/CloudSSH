@@ -58,6 +58,17 @@ describe('SSH 状态国际化', () => {
     ).toBe('Packet processing error: invalid packet');
   });
 
+  it('区分证书签名检查、TOFU 信任与无效主机密钥', () => {
+    expect(localizedSSHMessage('后端回退消息', 'host_key_invalid')).toBe(
+      'Invalid host key or certificate. Connection closed; check the server configuration.'
+    );
+    expect(localizedSSHMessage('后端回退消息', 'host_key_certificate_tofu')).toBe(
+      'Host certificate signature checked; host identity uses the underlying public-key fingerprint (TOFU), not CA trust.'
+    );
+    expect(localizedSSHMessage('', 'algorithm_error', { message: 'No common host key algorithm' }))
+      .toBe('Algorithm negotiation failed: No common host key algorithm');
+  });
+
   it('输出闸门关闭事件使用本地化文案', () => {
     expect(localizedSSHMessage('后端回退消息', 'output_backlog_closed')).toBe(
       'Terminal output backlog exceeded or client acknowledgement timed out, connection closed'

@@ -141,6 +141,52 @@ test('空密码连接可进入交互认证，单个空响应及零提示轮次�
   await expect(page.locator('#term-status')).toContainText('已连接');
 });
 
+for (const [locale, hint] of [
+  ['zh-CN', '服务器还要求密码'], ['zh-TW', '伺服器還要求密碼'],
+  ['en-US', 'also requires a password'],
+]) {
+  test(`公钥后 password 第二因素显式提交且不持久化 (${locale})`, async ({ page }) => {
+    const responses: Array<{ id: string; responses: string[] }> = [];
+    const acks: string[] = [];
+    await page.route('**/api/known-hosts?**', (route) => route.request().method() === 'GET'
+      ? route.fulfill({ status: 401, json: { error: 'unauthorized' } }) : route.fallback());
+    await page.routeWebSocket('**/api/ssh*', (socket) => {
+      socket.onMessage((data) => {
+        if (typeof data !== 'string') return;
+        const message = JSON.parse(data);
+        if (message.host) {
+          expect(message.authMethod).toBe('publickey');
+          expect(message).not.toHaveProperty('password');
+          socket.send(JSON.stringify({ type: 'auth_challenge', id: 'password-factor', method: 'password',
+            name: '', instruction: '', prompts: [{ text: '', echo: false }], canUseStoredPassword: false }));
+        } else if (message.type === 'auth_challenge_ack') acks.push(message.id);
+        else if (message.type === 'auth_response') {
+          responses.push(message);
+          socket.send(JSON.stringify({ type: 'status', event: 'auth_success', message: '' }));
+          socket.send(JSON.stringify({ type: 'status', event: 'shell_ready', message: '' }));
+        }
+      });
+    });
+    await page.goto(`/?lang=${locale}`);
+    await page.locator('#host').fill('ssh.example.com');
+    await page.locator('#username').fill('test-user');
+    await page.locator('#auth-tab-key').click();
+    await page.locator('#private-key').fill('test-key');
+    await page.locator('#connect-btn').click();
+    await expect(page.locator('.auth-challenge-dialog__instruction')).toContainText(hint);
+    await expect.poll(() => acks).toEqual(['password-factor']);
+    expect(responses).toHaveLength(0);
+    await expect(page.locator('.auth-challenge-dialog__button--stored')).toHaveCount(0);
+    const input = page.locator('.auth-challenge-dialog__input');
+    await input.fill('transient-factor-secret');
+    await input.press('Enter');
+    await expect.poll(() => responses.length).toBe(1);
+    expect(responses[0]).toMatchObject({ id: 'password-factor', responses: ['transient-factor-secret'] });
+    await expect(page.locator('.auth-challenge-dialog')).toHaveCount(0);
+    expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain('transient-factor-secret');
+  });
+}
+
 test('renders a Serv00 password challenge and acknowledges it only after display', async ({
   page,
 }) => {

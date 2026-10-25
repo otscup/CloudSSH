@@ -36,6 +36,8 @@ const SSH_EVENT_KEYS: Record<string, TranslationKey> = {
   algorithm_error: 'terminal.status.algorithmError',
   service_error: 'terminal.status.serviceError',
   host_key_accepted: 'terminal.status.hostKeyAccepted',
+  host_key_invalid: 'terminal.status.hostKeyInvalid',
+  host_key_certificate_tofu: 'terminal.status.hostKeyCertificateTofu',
   host_key_fingerprint_matched_unverified: 'terminal.status.hostKeyFingerprintMatchedUnverified',
   host_key_first_seen: 'terminal.status.hostKeyFirstSeen',
   host_key_not_saved: 'terminal.status.hostKeyNotSaved',

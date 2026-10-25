@@ -9,6 +9,7 @@ export interface PendingAuthChallenge {
   id: string;
   prompts: Array<{ text: string; echo: boolean }>;
   phase: 'awaiting_ack' | 'awaiting_response';
+  method?: 'keyboard-interactive' | 'password';
   timeout: ReturnType<typeof setTimeout>;
 }
 
@@ -93,6 +94,22 @@ export class KeyboardInteractiveAuthHandler {
       return;
     }
 
+    this.beginChallenge(request, 'keyboard-interactive');
+  }
+
+  /** A second password factor is prompted, never inferred from the configured key or password. */
+  requestPasswordFactor(): void {
+    if (this.pendingChallenge || this.rounds >= MAX_KEYBOARD_INTERACTIVE_ROUNDS) {
+      this.ctx.failAuthentication('认证挑战轮次过多或重叠', 'auth_interactive_limit');
+      return;
+    }
+    this.beginChallenge({ name: '', instruction: '', prompts: [{ text: '', echo: false }] }, 'password');
+  }
+
+  private beginChallenge(
+    request: { name: string; instruction: string; prompts: Array<{ text: string; echo: boolean }> },
+    method: 'keyboard-interactive' | 'password'
+  ): void {
     this.rounds++;
     const id = crypto.randomUUID();
     const timeout = setTimeout(() => {
@@ -109,6 +126,7 @@ export class KeyboardInteractiveAuthHandler {
       id,
       prompts: request.prompts.map((prompt) => ({ ...prompt })),
       phase: 'awaiting_ack',
+      method,
       timeout,
     };
 
@@ -116,6 +134,7 @@ export class KeyboardInteractiveAuthHandler {
     try {
       this.ctx.sendWebSocketJSON({
         type: 'auth_challenge',
+        ...(method === 'password' ? { method } : {}),
         id,
         name: request.name,
         instruction: request.instruction,
@@ -136,7 +155,8 @@ export class KeyboardInteractiveAuthHandler {
   }
 
   handleAck(message: Record<string, unknown>): void {
-    if (this.ctx.getState() !== 'auth' || this.ctx.getActiveAuthMethod() !== 'keyboard-interactive') {
+    if (this.ctx.getState() !== 'auth' || this.ctx.getActiveAuthMethod() !==
+        (this.pendingChallenge?.method ?? 'keyboard-interactive')) {
       return;
     }
 
@@ -160,7 +180,8 @@ export class KeyboardInteractiveAuthHandler {
   }
 
   async handleResponse(message: Record<string, unknown>): Promise<void> {
-    if (this.ctx.getState() !== 'auth' || this.ctx.getActiveAuthMethod() !== 'keyboard-interactive') {
+    if (this.ctx.getState() !== 'auth' || this.ctx.getActiveAuthMethod() !==
+        (this.pendingChallenge?.method ?? 'keyboard-interactive')) {
       return;
     }
 
@@ -204,7 +225,11 @@ export class KeyboardInteractiveAuthHandler {
 
     let responsePayload: Uint8Array;
     try {
+      // Reuse RFC 4256 response bounds before constructing the password request.
       responsePayload = SSHAuth.buildKeyboardInteractiveInfoResponse(responses);
+      if (pending.method === 'password') {
+        responsePayload = SSHAuth.buildPasswordAuthRequest(config.username, responses[0]);
+      }
     } catch {
       this.ctx.failAuthentication('交互式认证响应超过安全限制', 'auth_interactive_invalid_response');
       return;
@@ -220,7 +245,8 @@ export class KeyboardInteractiveAuthHandler {
   }
 
   handleCancel(message: Record<string, unknown>): void {
-    if (this.ctx.getState() !== 'auth' || this.ctx.getActiveAuthMethod() !== 'keyboard-interactive') {
+    if (this.ctx.getState() !== 'auth' || this.ctx.getActiveAuthMethod() !==
+        (this.pendingChallenge?.method ?? 'keyboard-interactive')) {
       return;
     }
     const pending = this.pendingChallenge;

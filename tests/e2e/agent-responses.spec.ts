@@ -10,10 +10,9 @@ async function mount(page: import('@playwright/test').Page, locale = 'zh-CN') {
     const root = document.createElement('div');
     root.id = 'responses-agent-test'; root.style.width = '900px'; root.style.height = '640px';
     document.body.appendChild(root);
-    const panel = new module.AgentPanel(root, true);
+    const panel = new module.AgentPanel(root, true, 1, 42);
     const sent: any[] = [];
     panel.render(); panel.show();
-    panel.serverId = 1;
     panel.setWebSocketSend((data: string) => sent.push(JSON.parse(data)));
     (window as any).__responsesAgent = { panel, sent };
   });
@@ -32,13 +31,171 @@ test('Responses text completion does not finish the task; run_end does', async (
     panel.handleAgentFrame({ subType: 'memory_updated' });
   });
   await expect(page.locator('#agent-send-btn')).toHaveClass(/is-stopping/);
-  expect(await page.evaluate(() => !!localStorage.getItem('cloudssh_agent_draft_1'))).toBe(true);
+  expect(await page.evaluate(() => !!localStorage.getItem('cloudssh_agent_draft_42_1'))).toBe(true);
   await page.evaluate(() => {
     const { panel, sent } = (window as any).__responsesAgent;
     panel.handleAgentFrame({ subType: 'run_end', runId: 1, requestId: sent.at(-1).requestId, outcome: 'completed' });
   });
   await expect(page.locator('#agent-send-btn')).not.toHaveClass(/is-stopping/);
+  expect(await page.evaluate(() => localStorage.getItem('cloudssh_agent_draft_42_1'))).toBeNull();
+});
+
+test('late memory updates do not erase an interrupted task draft', async ({ page }) => {
+  await mount(page);
+  await page.evaluate(() => {
+    const { panel, sent } = (window as any).__responsesAgent;
+    panel.sendMessage('Interrupted inspection');
+    const requestId = sent.at(-1).requestId;
+    panel.handleAgentFrame({ subType: 'run_start', requestId, runId: 1 });
+    panel.handleAgentFrame({ subType: 'run_end', requestId, runId: 1, outcome: 'failed' });
+  });
+  const before = await page.evaluate(() => localStorage.getItem('cloudssh_agent_draft_42_1'));
+  expect(before).not.toBeNull();
+  await page.evaluate(() => (window as any).__responsesAgent.panel.handleAgentFrame({ subType: 'memory_updated' }));
+  expect(await page.evaluate(() => localStorage.getItem('cloudssh_agent_draft_42_1'))).toBe(before);
+});
+
+test('drafts isolate colliding server IDs by GitHub account and still resume for their owner', async ({ page }) => {
+  await mount(page);
+  const result = await page.evaluate(async () => {
+    const { AgentPanel } = await (window as any).eval("import('/src/agent/agent-panel.ts')");
+    const { panel: a } = (window as any).__responsesAgent;
+    a.sendMessage('A-ONLY-SECRET');
+    a.dispose();
+    const b = new AgentPanel(document.body, true, 1, 43);
+    b.render();
+    const bText = document.getElementById('agent-messages')!.textContent;
+    b.sendMessage('B-ONLY-SECRET');
+    b.dispose();
+    const resumedA = new AgentPanel(document.body, true, 1, 42);
+    resumedA.render();
+    const aText = document.getElementById('agent-messages')!.textContent;
+    const hasResume = !!document.getElementById('agent-resume-task-chip');
+    resumedA.clearSessionDraft();
+    const bDraft = localStorage.getItem('cloudssh_agent_draft_43_1');
+    resumedA.dispose();
+    return { bText, aText, hasResume, bDraft, aDraft: localStorage.getItem('cloudssh_agent_draft_42_1') };
+  });
+  expect(result.bText).not.toContain('A-ONLY-SECRET');
+  expect(result.aText).toContain('A-ONLY-SECRET');
+  expect(result.aText).not.toContain('B-ONLY-SECRET');
+  expect(result.hasResume).toBe(true);
+  expect(result.bDraft).toContain('B-ONLY-SECRET');
+  expect(result.aDraft).toBeNull();
+});
+
+for (const invalid of ['expired', 'completed', 'wrong-owner', 'wrong-server', 'invalid-time']) {
+  test(`draft restore rejects ${invalid} data`, async ({ page }) => {
+    await mount(page);
+    const result = await page.evaluate(async invalid => {
+      const { AgentPanel } = await (window as any).eval("import('/src/agent/agent-panel.ts')");
+      (window as any).__responsesAgent.panel.dispose();
+      const draft = { githubId: invalid === 'wrong-owner' ? 43 : 42,
+        serverId: invalid === 'wrong-server' ? 2 : 1,
+        updatedAt: invalid === 'expired' ? Date.now() - 31 * 60_000 : invalid === 'invalid-time' ? null : Date.now(),
+        messages: [{ role: 'user', content: 'MUST-NOT-RESTORE' }], wasInterrupted: invalid !== 'completed' };
+      localStorage.setItem('cloudssh_agent_draft_42_1', JSON.stringify(draft));
+      const panel = new AgentPanel(document.body, true, 1, 42);
+      panel.render();
+      const text = document.getElementById('agent-messages')!.textContent;
+      panel.dispose();
+      return { text, stored: localStorage.getItem('cloudssh_agent_draft_42_1') };
+    }, invalid);
+    expect(result.text).not.toContain('MUST-NOT-RESTORE');
+    expect(result.stored).toBeNull();
+  });
+}
+
+test('missing identity or anonymous mode never reads or writes another account draft', async ({ page }) => {
+  await mount(page);
+  const result = await page.evaluate(async () => {
+    const { AgentPanel } = await (window as any).eval("import('/src/agent/agent-panel.ts')");
+    const { panel: owner } = (window as any).__responsesAgent;
+    owner.sendMessage('OWNER-SECRET');
+    owner.dispose();
+    const original = localStorage.getItem('cloudssh_agent_draft_42_1');
+    for (const args of [[true, undefined], [false, 42]]) {
+      const panel = new AgentPanel(document.body, args[0], 1, args[1]);
+      panel.render();
+      if (document.getElementById('agent-messages')!.textContent!.includes('OWNER-SECRET')) {
+        throw new Error('Draft restored without an authenticated owner');
+      }
+      panel.sendMessage('UNOWNED-MESSAGE');
+      panel.dispose();
+    }
+    return { original, current: localStorage.getItem('cloudssh_agent_draft_42_1'),
+      unscoped: localStorage.getItem('cloudssh_agent_draft_1') };
+  });
+  expect(result.current).toBe(result.original);
+  expect(result.unscoped).toBeNull();
+});
+
+test('real logout clears account drafts, discards legacy data, and blocks late frame recreation before account switch', async ({ page }) => {
+  await mockAnonymousSession(page);
+  let githubId = 42;
+  let logoutCount = 0;
+  await page.route('**/api/auth/me', route => route.request().method() === 'GET'
+    ? route.fulfill({ json: { id: 1, github_id: githubId, username: `user-${githubId}`, avatar_url: '' } })
+    : route.fallback());
+  await page.route('**/api/servers', route => route.request().method() === 'GET'
+    ? route.fulfill({ json: [] }) : route.fallback());
+  await page.route('**/api/auth/logout', route => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    logoutCount++;
+    return route.fulfill({ json: { success: true } });
+  });
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('drafts-seeded')) return;
+    sessionStorage.setItem('drafts-seeded', 'true');
+    const draft = { serverId: 1, updatedAt: Date.now(), wasInterrupted: true,
+      messages: [{ role: 'user', content: 'B-OWN-SECRET' }] };
+    localStorage.setItem('cloudssh_agent_draft_43_1', JSON.stringify({ ...draft, githubId: 43 }));
+    localStorage.setItem('cloudssh_agent_draft_1', JSON.stringify({ ...draft,
+      messages: [{ role: 'user', content: 'UNOWNED-LEGACY-SECRET' }] }));
+    localStorage.setItem('cloudssh_agent_draft_42_2', 'another A draft');
+  });
+  await page.goto('/?lang=en-US');
+  await expect(page.locator('#user-space-section')).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem('cloudssh_agent_draft_1'))).toBeNull();
+  await page.evaluate(async () => {
+    const main = await (window as any).eval("import('/src/main.ts')");
+    const { tab } = main.showTerminalWithNewTab('A server', { host: 'a.example.com', port: 22, serverId: 1 });
+    tab.terminal.onSessionReady();
+    // Use the real TabManager-created panel to check identity propagation from /api/auth/me.
+    if (tab.agentPanel.githubId !== 42) throw new Error('Wrong panel owner');
+    tab.agentPanel.sendMessage('A-ONLY-SECRET');
+    (window as any).__loggedOutPanel = tab.agentPanel;
+    main.showConnectionPage();
+    document.getElementById('logout-btn')!.click();
+  });
+  await expect(page.locator('#auth-section')).toBeVisible();
+  expect(logoutCount).toBe(1);
+  await page.evaluate(() => {
+    const old = (window as any).__loggedOutPanel;
+    old.handleAgentFrame({ subType: 'run_end', outcome: 'failed' });
+    old.saveSessionDraft(true);
+  });
+  const afterLogout = await page.evaluate(() => ({
+    a: localStorage.getItem('cloudssh_agent_draft_42_1'),
+    aOther: localStorage.getItem('cloudssh_agent_draft_42_2'),
+    b: localStorage.getItem('cloudssh_agent_draft_43_1'),
+  }));
+  expect(afterLogout.a).toBeNull();
+  expect(afterLogout.aOther).toBeNull();
+  expect(afterLogout.b).toContain('B-OWN-SECRET');
+  githubId = 43;
+  await page.reload();
+  await expect(page.locator('#user-space-section')).toBeVisible();
+  const bText = await page.evaluate(async () => {
+    const main = await (window as any).eval("import('/src/main.ts')");
+    const { tab } = main.showTerminalWithNewTab('B server', { host: 'b.example.com', port: 22, serverId: 1 });
+    tab.terminal.onSessionReady();
+    if (tab.agentPanel.githubId !== 43) throw new Error('Wrong panel owner after account switch');
+    return document.getElementById('agent-messages')!.textContent;
+  });
+  expect(bText).toContain('B-OWN-SECRET');
+  expect(bText).not.toContain('A-ONLY-SECRET');
+  expect(bText).not.toContain('UNOWNED-LEGACY-SECRET');
 });
 
 test('replacement requests ignore stale output and stale completion', async ({ page }) => {
@@ -73,7 +230,7 @@ for (const [locale, expected] of [['zh-CN', '模型响应未完成'], ['zh-TW', 
   });
 }
 
-test('safe request diagnostics are visible without exposing provider bodies or arbitrary fields', async ({ page }) => {
+test('chat shows short errors without technical diagnostics or provider text', async ({ page }) => {
   await mount(page, 'en-US');
   await page.evaluate(() => {
     const { panel, sent } = (window as any).__responsesAgent;
@@ -87,10 +244,11 @@ test('safe request diagnostics are visible without exposing provider bodies or a
     panel.handleAgentFrame({ subType: 'run_end', runId: 1, requestId, outcome: 'failed' });
   });
   const messages = page.locator('#agent-messages');
-  await expect(messages).toContainText('Context checkpoint');
-  await expect(messages).toContainText('text.format');
-  await expect(messages).toContainText('unsupported_parameter');
-  await expect(messages).toContainText('12345678-1234-4123-8123-123456789abc');
+  await expect(messages).toContainText('Context compaction stopped');
+  await expect(messages).toContainText('Responses API request failed (HTTP 400). Check your key, model, and provider capabilities.');
+  for (const detail of ['text.format', 'unsupported_parameter', '12345678-1234-4123-8123-123456789abc']) {
+    await expect(messages).not.toContainText(detail);
+  }
   await expect(messages).not.toContainText('SECRET');
   await expect(messages.locator('img, script')).toHaveCount(0);
 });
@@ -104,19 +262,22 @@ test('an auxiliary memory failure warns without removing the active task stream'
     panel.handleAgentFrame({ subType: 'stream_chunk', requestId, content: 'ACTIVE_STREAM' });
     panel.handleAgentFrame({ subType: 'memory_status', requestId, code: 'memory_failed',
       errorCode: 'responses_http', status: 500, diagnostics: { purpose: 'memory', stage: 'http',
-        providerCode: 'server_error' } });
+        providerCode: 'server_error', requestId: '12345678-1234-4123-8123-123456789abc' } });
   });
-  await expect(page.locator('.app-toast')).toContainText('Memory extraction failed');
+  await expect(page.locator('.app-toast')).toContainText('Knowledge extraction failed');
+  for (const detail of ['server_error', '12345678-1234-4123-8123-123456789abc']) {
+    await expect(page.locator('.app-toast')).not.toContainText(detail);
+  }
   await expect(page.locator('#agent-send-btn')).toHaveClass(/is-stopping/);
   await expect(page.locator('#agent-messages')).toContainText('ACTIVE_STREAM');
 });
 
-for (const [locale, recovery, fallback, paused] of [
-  ['zh-CN', '正在缩小输入', '本地执行事实', '安全暂停'],
-  ['zh-TW', '正在縮小輸入', '本機執行事實', '安全暫停'],
-  ['en-US', 'Regenerating once', 'local execution facts', 'safely paused'],
+for (const [locale, fallback, paused] of [
+  ['zh-CN', '近期对话', '安全暂停'],
+  ['zh-TW', '近期對話', '安全暫停'],
+  ['en-US', 'recent conversation', 'safely paused'],
 ]) {
-  test(`checkpoint recovery, fallback and pause diagnostics are localized (${locale})`, async ({ page }) => {
+  test(`context compaction local fallback and pause diagnostics are localized (${locale})`, async ({ page }) => {
     await mount(page, locale);
     await page.evaluate(() => {
       const { panel, sent } = (window as any).__responsesAgent;
@@ -128,11 +289,6 @@ for (const [locale, recovery, fallback, paused] of [
     await expect(page.locator('.app-toast')).toHaveCount(0);
     await page.evaluate(() => {
       const { panel, sent } = (window as any).__responsesAgent;
-      panel.handleAgentFrame({ subType: 'context_status', requestId: sent.at(-1).requestId, recovering: true });
-    });
-    await expect(page.locator('.app-toast').filter({ hasText: recovery })).toBeVisible();
-    await page.evaluate(() => {
-      const { panel, sent } = (window as any).__responsesAgent;
       panel.handleAgentFrame({ subType: 'context_status', requestId: sent.at(-1).requestId, compacted: true, checkpointSource: 'local' });
     });
     await expect(page.locator('.app-toast').filter({ hasText: fallback })).toBeVisible();
@@ -141,15 +297,14 @@ for (const [locale, recovery, fallback, paused] of [
     await page.evaluate(() => {
       const { panel, sent } = (window as any).__responsesAgent;
       const requestId = sent.at(-1).requestId;
-      panel.handleAgentFrame({ subType: 'error', requestId, runId: 1, code: 'responses_incomplete',
-        message: 'SECRET_PROVIDER_BODY', diagnostics: { purpose: 'checkpoint', stage: 'parse',
-          incompleteReason: 'max_output_tokens', requestedOutputTokens: 8192, outputTokens: 8000,
-          reasoningTokens: 7900, requestId: '12345678-1234-4123-8123-123456789abc', rawReason: 'SECRET' } });
+      panel.handleAgentFrame({ subType: 'error', requestId, runId: 1, code: 'responses_budget',
+        message: 'SECRET_PROVIDER_BODY', diagnostics: { purpose: 'checkpoint', stage: 'http',
+          requestId: '12345678-1234-4123-8123-123456789abc' } });
       panel.handleAgentFrame({ subType: 'run_end', requestId, runId: 1, outcome: 'failed' });
     });
     const messages = page.locator('#agent-messages');
     await expect(messages).toContainText(paused);
-    for (const value of ['8192', '8000', '7900', '12345678-1234-4123-8123-123456789abc']) await expect(messages).toContainText(value);
+    for (const value of ['12345678-1234-4123-8123-123456789abc']) await expect(messages).not.toContainText(value);
     await expect(messages).not.toContainText('SECRET');
     await expect(page.locator('#agent-send-btn')).not.toHaveClass(/is-stopping/);
   });
@@ -334,4 +489,73 @@ test('thinking box completely collapses live preview on completion even after in
   await expect(thinkingBox.locator('.tp-steps')).toContainText('$ df -h');
   await expect(thinkingBox.locator('.tp-steps')).toContainText('正在分析');
   await expect(thinkingBox.locator('.tp-steps')).toContainText('$ uname -a');
+});
+
+for (const inline of [false, true]) {
+  for (const signal of ['composition', 'isComposing', '229']) {
+    test(`Agent ${inline ? '内联编辑' : '主输入框'}按 ${signal} 保护选词回车，下一次 Enter 无需等待`, async ({ page }) => {
+      await mount(page);
+      if (inline) {
+        await page.evaluate(() => {
+          const { panel, sent } = (window as any).__responsesAgent;
+          panel.sendMessage('原问题');
+          const requestId = sent[0].requestId;
+          panel.handleAgentFrame({ subType: 'run_start', runId: 1, requestId });
+          panel.handleAgentFrame({ subType: 'run_end', runId: 1, requestId, outcome: 'completed' });
+          sent.length = 0;
+        });
+        await page.locator('.agent-user-edit-btn').focus();
+        await page.locator('.agent-user-edit-btn').press('Enter');
+      }
+      const input = page.locator(inline ? '.agent-user-edit-textarea' : '#agent-input');
+      await input.focus();
+      const result = await input.evaluate((el: HTMLTextAreaElement, signal) => {
+        const { panel, sent } = (window as any).__responsesAgent;
+        const key = (key: string, keyCode: number, isComposing = false) => {
+          const event = new KeyboardEvent('keydown', {
+            bubbles: true, cancelable: true, key, keyCode, isComposing,
+          });
+          el.dispatchEvent(event);
+          return event.defaultPrevented;
+        };
+        el.value = 'nihao';
+        if (signal === 'composition') {
+          el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        }
+        const prevented = key('Enter', signal === '229' ? 229 : 13, signal === 'isComposing');
+        key('Escape', signal === '229' ? 229 : 27, signal === 'isComposing');
+        const during = { count: sent.length, open: panel.isOpen, connected: el.isConnected };
+        el.value = '你好';
+        el.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '你好' }));
+        // Safari's confirmation Enter can arrive after compositionend with isComposing=false.
+        key('Enter', 229);
+        const afterConfirm = sent.length;
+        key('Enter', 13); // Immediately send intentionally; there is no arbitrary cooldown.
+        return { prevented, during, afterConfirm, sent: [...sent] };
+      }, signal);
+      expect(result.prevented).toBe(false);
+      expect(result.during).toEqual({ count: 0, open: true, connected: true });
+      expect(result.afterConfirm).toBe(0);
+      expect(result.sent).toHaveLength(1);
+      expect(result.sent[0]).toMatchObject({ type: 'agent_start', message: '你好' });
+    });
+  }
+}
+
+test('Agent 保留 Shift+Enter 换行与点击发送，失焦后不残留组词状态', async ({ page }) => {
+  await mount(page);
+  const input = page.locator('#agent-input');
+  await input.fill('第一行');
+  await input.evaluate((el) => {
+    el.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    el.blur(); // Interrupted composition may not deliver compositionend.
+  });
+  await input.focus();
+  await input.press('Shift+Enter');
+  await expect(input).toHaveValue('第一行\n');
+  expect(await page.evaluate(() => (window as any).__responsesAgent.sent.length)).toBe(0);
+  await page.locator('#agent-send-btn').click();
+  const sent = await page.evaluate(() => (window as any).__responsesAgent.sent);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]).toMatchObject({ type: 'agent_start', message: '第一行' });
 });

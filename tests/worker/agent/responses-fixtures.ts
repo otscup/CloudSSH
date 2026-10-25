@@ -28,6 +28,3 @@ export function reply(id: string, text = 'Complete.', calls: ResponseFunctionCal
   return sse([...(text ? [{ type: 'response.output_text.delta', delta: text }] : []),
     { type: 'response.completed', response: responseObject(id, text, calls, request) }]);
 }
-
-export const checkpoint = { goal: 'Inspect nginx', facts: ['Linux server'], operations: ['free -m completed'],
-  pending: ['Check nginx'], constraints: ['Do not repeat completed commands'], unknown: [] };

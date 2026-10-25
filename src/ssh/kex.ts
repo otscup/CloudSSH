@@ -1,6 +1,7 @@
 import { type KEXInitMessage, SSH_MSG_KEXINIT } from '../types';
 import {
   SUPPORTED_ENCRYPTION_ALGORITHMS,
+  SUPPORTED_HOST_KEY_ALGORITHMS,
   SUPPORTED_KEX_ALGORITHMS,
   SUPPORTED_MAC_ALGORITHMS,
 } from './algorithms';
@@ -20,7 +21,7 @@ export class KEXInitBuilder {
       // RFC 8301 §2.1: ext-info-c 作为伪算法名插入到 kex_algorithms 列表的最前面，
       // 通知服务器客户端愿意接收 SSH_MSG_EXT_INFO（用于 server-sig-algs 协商）
       ['ext-info-c', ...SUPPORTED_KEX_ALGORITHMS].join(','),
-      'ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256,ssh-rsa',
+      SUPPORTED_HOST_KEY_ALGORITHMS.join(','),
       SUPPORTED_ENCRYPTION_ALGORITHMS.join(','),
       SUPPORTED_ENCRYPTION_ALGORITHMS.join(','),
       SUPPORTED_MAC_ALGORITHMS.join(','),
@@ -93,8 +94,11 @@ export function negotiate(
   for (const algo of clientList) {
     if (serverList.includes(algo)) return algo;
   }
+  // Proposals are untrusted: keep errors bounded and strip terminal control characters.
+  const display = (list: string[]) => list.slice(0, 16)
+    .map((name) => name.replace(/[^\x21-\x7e]/g, '?').slice(0, 128)).join(',');
   throw new Error(
-    `No common ${category}: client=[${clientList.join(',')}] server=[${serverList.join(',')}]`
+    `No common ${category}: client=[${display(clientList)}] server=[${display(serverList)}]`
   );
 }
 

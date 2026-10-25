@@ -137,9 +137,10 @@ describe('keyboard-interactive 浏览器交互边界', () => {
     expect(authFormSource).toContain(
       "const selectedPassword = this.authMode === 'password' ? password : undefined;",
     );
-    expect(authFormSource).toContain(
-      "const selectedPrivateKey = this.authMode === 'key' ? privateKey : undefined;",
+    expect(authFormSource).toMatch(
+      /(?:const|let) selectedPrivateKey = this\.authMode === 'key' \? privateKey : undefined;/,
     );
+    expect(authFormSource).toContain('preparePrivateKey(selectedPrivateKey, false)');
     expect(authFormSource).toContain('password: selectedPassword,');
     expect(authFormSource).toContain('privateKey: selectedPrivateKey,');
   });

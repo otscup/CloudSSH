@@ -3,6 +3,7 @@ import { isValidTunnelHostname, maskIPAddress } from './host-display';
 import { getLocale, onLocaleChange, t } from './i18n';
 import { osDisplayName, osIconSvg } from './os-icons';
 import { parsePort } from './port';
+import { preparePrivateKey } from './private-key-import';
 import { populateRegionSelect, regionLabel } from './regions';
 import { ShareManager } from './share-manager';
 import type { SSHHostInfo } from './terminal';
@@ -186,6 +187,7 @@ export class ServerList {
   private editingOriginalAuthMethod: ServerConfig['auth_method'] | null = null;
   private modalAuthMode: 'password' | 'key' | 'none' = 'password';
   private modalTransportMode: 'direct' | 'cf_tunnel' = 'direct';
+  private modalGeneration = 0;
   private clearCfAccessClientSecret = false;
   private searchQuery = '';
   private selectedTag = '';
@@ -820,6 +822,7 @@ export class ServerList {
   // ==================== Modal 操作 ====================
 
   showModal(mode: 'add' | 'edit' | 'clone', server?: ServerConfig): void {
+    this.modalGeneration++;
     this.editingServerId = mode === 'edit' && server ? server.id : null;
     this.editingOriginalAuthMethod = mode === 'edit' && server ? server.auth_method : null;
 
@@ -827,6 +830,7 @@ export class ServerList {
     const title = document.getElementById('modal-title');
     const submitBtn = document.getElementById('server-submit-btn');
     if (!modal || !title || !submitBtn) return;
+    (submitBtn as HTMLButtonElement).disabled = false;
     (document.getElementById('server-empty-password') as HTMLInputElement).checked = false;
 
     if (mode === 'add') {
@@ -948,13 +952,13 @@ export class ServerList {
     modal.classList.remove('hidden');
     modal.classList.add('flex');
 
-    // 聚焦第一个输入框
-    setTimeout(() => {
-      (document.getElementById('server-name') as HTMLInputElement)?.focus();
-    }, 100);
+    // Focus synchronously once visible: a delayed callback can steal focus from a
+    // field the user has already started editing, or from a newer dialog.
+    (document.getElementById('server-name') as HTMLInputElement)?.focus({ preventScroll: true });
   }
 
   hideModal(): void {
+    this.modalGeneration++;
     const modal = document.getElementById('server-modal');
     if (modal) {
       modal.classList.add('hidden');
@@ -1140,6 +1144,9 @@ export class ServerList {
   }
 
   private async handleSubmit(): Promise<void> {
+    const generation = this.modalGeneration;
+    const editingServerId = this.editingServerId;
+    if ((document.getElementById('server-submit-btn') as HTMLButtonElement).disabled) return;
     const name = (document.getElementById('server-name') as HTMLInputElement).value.trim();
     const host = (document.getElementById('server-host') as HTMLInputElement).value.trim();
     const portInput = document.getElementById('server-port') as HTMLInputElement;
@@ -1187,7 +1194,7 @@ export class ServerList {
     const useEmptyPassword =
       authMethod === 'password' &&
       (document.getElementById('server-empty-password') as HTMLInputElement).checked;
-    const credential =
+    let credential =
       authMethod === 'none' || useEmptyPassword
         ? ''
         : authMethod === 'publickey' ? privateKey : password;
@@ -1236,6 +1243,15 @@ export class ServerList {
     `;
 
     try {
+      if (authMethod === 'publickey' && credential) {
+        const prepared = await preparePrivateKey(credential, true);
+        if (!prepared || generation !== this.modalGeneration || this.modalAuthMode !== 'key' ||
+            (document.getElementById('server-host') as HTMLInputElement).value.trim() !== host ||
+            (document.getElementById('server-username') as HTMLInputElement).value.trim() !== username ||
+            (document.getElementById('server-private-key') as HTMLTextAreaElement).value !== privateKey ||
+            (this.modalTransportMode === 'cf_tunnel') !== isTunnel) return;
+        credential = prepared.key;
+      }
       const body: ServerSavePayload = {
         name,
         host,
@@ -1277,8 +1293,8 @@ export class ServerList {
 
       // 保存请求（后端在保存时会同步推断 locationHint，故时间可能略长）
       let res: Response;
-      if (this.editingServerId) {
-        res = await fetch(`/api/servers/${this.editingServerId}`, {
+      if (editingServerId) {
+        res = await fetch(`/api/servers/${editingServerId}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -1347,12 +1363,15 @@ export class ServerList {
         variant: 'danger',
       });
     } finally {
-      submitBtn.disabled = false;
-    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
-      submitBtn.innerHTML = `
-        <span class="material-symbols-outlined" style="font-size: 18px;">save</span>
-        ${this.editingServerId ? t('server.update') : t('server.save')}
-      `;
+      // An old unlock/save must never mutate a subsequently opened editor's controls.
+      if (generation === this.modalGeneration) {
+        submitBtn.disabled = false;
+        // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
+        submitBtn.innerHTML = `
+          <span class="material-symbols-outlined" style="font-size: 18px;">save</span>
+          ${this.editingServerId ? t('server.update') : t('server.save')}
+        `;
+      }
     }
   }
 
