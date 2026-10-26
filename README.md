@@ -54,6 +54,8 @@
   - [GitHub 绑定自动部署](#推荐通过-github-绑定自动部署)
     - [自动同步上游版本](#可选自动同步上游版本)
   - [可配置环境变量](#可配置环境变量)
+  - [启用 Cloudflare Access 登录](#可选启用-cloudflare-zero-trust-access-登录)
+  - [启用单管理员密码登录](#可选启用单管理员密码登录替代-github-oauth)
   - [配置 Turnstile](#可选配置-turnstile-人机验证)
   - [配置 GitHub OAuth](#可选配置-github-oauth-登录与服务器管理)
 - [开发说明](#development)
@@ -199,15 +201,13 @@ flowchart TB
 
 > **说明**：如需部署 test 环境，可 Fork 后在 `test` 分支上重复上述步骤，创建独立的 Worker（如 `cloudssh-test`）。两个环境的 Durable Objects 数据完全隔离，各自独立。
 
-> **Fork 的 CI 策略**：通过 Cloudflare 面板 / Git 集成部署不需要启用 GitHub Actions，也不需要配置本项目 CI 使用的 Cloudflare Secrets。Workers 部署、GitHub Pages 发布和 SSH 互操作测试的 job 仅在仓库所有者为 `newbietan` 时执行；其他用户的 Fork 中只保留按需运行的上游同步。GitHub 可能显示这些受限工作流的 **Skipped** 记录，但不会分配 runner 执行任务。
-
 ##### 版本更新提示
 
-页面会在后台检查官方 `main` 分支的最新稳定版本；连接页的版本标记位于“连接参数”标题后；有新版时，同处显示可忽略的小提示。用户空间和桌面终端仍放在页脚，移动端终端位于“更多”菜单。点击可查看更新日志，升级由部署者自行选择同步仓库并重新部署；不会自动刷新、强制升级或中断当前会话。忽略仅针对该版本，下个新版仍可提示。
+项目会在后台检查官方 `main` 分支的最新稳定版本；有新版时，同处显示可忽略的小提示。点击可查看更新日志，升级由部署者自行选择同步仓库并重新部署；不会自动刷新、强制升级或中断当前会话。忽略仅针对该版本，下个新版仍可提示。
 
 检查由 Worker 向固定的官方 GitHub 地址读取公开版本号，不向 GitHub 发送用户凭据或服务器信息。成功检查缓存 6 小时，失败静默退避 15 分钟；网络不可用时不影响正常使用。
 
-##### 可选：自动同步上游版本
+##### 可选：自动同步上游最新版本（自动更新）
 
 Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流，将本项目 `main` 分支的最新版本同步到自己的 `main` 分支。**手动同步无需配置变量；定时同步默认关闭**，显式开启后每天北京时间 04:20 检查一次。同步产生的分支更新会由 Cloudflare Git 集成自动构建并部署，无需额外配置 CI 部署凭据。
 
@@ -225,6 +225,9 @@ Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流�
 
 所有功能与安全策略均由 Worker 环境变量控制，可在 Cloudflare Dashboard 的 **Settings → Variables and Secrets** 中按需添加（敏感凭据建议选择 **Secret** 加密类型），保存后重新部署即可生效：
 
+<details>
+<summary><b>点击展开查看完整环境变量配置表（IDLE_TIMEOUT、OAuth、密码登录、CF Access、分享等）</b></summary>
+
 | 环境变量                  | 是否必填           | 默认值                   | 作用说明                                                                                                                                                                                                                                                                                           | 配置建议与注意事项                                                                                                                                                                                                                                                                                |
 | ------------------------- | ------------------ | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `IDLE_TIMEOUT`            | 可选               | `30m`                    | 用户无操作空闲超时时长。会话超过该时间无键盘输入、SFTP 操作或 AI 任务将自动断开并释放 Durable Object。                                                                                                                                                                                             | **强烈建议保留默认或按需配置**。防止离开电脑或忘记关闭标签页无休止消耗 Cloudflare 每日 13,000 GB-s 免费额度。支持 `30m`、`1h`、`1800s`、`1800`（纯数字按秒解析）；设为 `0` 可禁用；超时前 60s 会在终端输出预警，敲击任意键可一秒续期。wrangler.toml `[vars]` 随部署默认下发，自定义请改配置文件。 |
@@ -233,6 +236,7 @@ Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流�
 | `BASE_URL`                | 启用登录时必填     | 无                       | 部署站点的完整公网访问根地址（如 `https://ssh.example.com`），用于生成 OAuth 授权回调跳转。                                                                                                                                                                                                        | 域名必须与 GitHub OAuth App 中的 Authorization callback URL 完全一致，末尾**不要**加斜杠 `/`。未配置时降级使用请求上下文 Host。                                                                                                                                                                   |
 | `GITHUB_ALLOWED_USER_IDS` | 可选               | 无（不限制）             | 允许登录系统的 GitHub **数字用户 ID** 白名单列表，多个 ID 以英文逗号分隔（如 `83105156,6236783`）。                                                                                                                                                                                                | **私有化部署核心防线**。未配置时任何 GitHub 用户均可登录；一旦配置，仅白名单用户允许登录（fail-closed 机制）。数字 ID 可访问 `https://api.github.com/users/<username>` 查看 `id` 字段获取。                                                                                                       |
 | `ADMIN_PASSWORD_HASH`     | 启用密码登录时必填 | 无                       | 单管理员密码登录凭据（格式：`pbkdf2$sha256$<迭代数>$<盐>$<校验值>`，用自定义密码在浏览器内生成——匿名实例页尾入口或任意实例 `#password-setup` 路由——或本地 `pnpm run hash-password`）。非空即启用密码模式：与 GitHub 登录互斥且优先级更高，全实例仅本地管理员一个账号，功能与 GitHub 登录完全一致。 | **敏感凭据，务必设为 Secret 类型**。置空/删除即刻退回 GitHub 登录模式（GitHub 配置与数据零影响）；换新值 = 修改密码（所有已登录会话立即失效）。密码模式不改变匿名 SSH 行为，需强制登录请配合 `REQUIRE_GITHUB_AUTH=true`；公网部署建议同时开启 Turnstile 防爆破。                                  |
+| `CF_ACCESS`               | 可选               | 自动感知                 | Cloudflare Zero Trust Access 认证模式开关。在控制台 Worker 详情页的「Access」选项卡中启用策略即可自动生效，亦可显式设为 `true`。                                                                                             | 开启后无需配置 GitHub OAuth 或密码，直接通过 Cloudflare Access（如账号授权、邮箱验证码等）登入系统。多用户天然隔离。                                                                                                            |
 | `REQUIRE_GITHUB_AUTH`     | 可选               | `false`                  | 是否强制登录后才可使用 SSH 终端（GitHub 或单管理员密码会话均满足）。设为 `true` 时彻底禁用匿名直连入口。                                                                                                                                                                                           | **公网部署防被蹭推荐开启**。若不希望未授权访客将你的 Worker 用作公开 SSH 代理节点，建议配置为 `true` 并配合白名单使用。wrangler.toml `[vars]` 随部署默认下发，自定义请改配置文件。                                                                                                                |
 | `TURNSTILE_SITEKEY`       | 可选               | 无                       | Cloudflare Turnstile 人机验证的前端公开 Site Key。                                                                                                                                                                                                                                                 | 公开密钥。与 `TURNSTILE_SECRET` 配合使用，在未配置或配置任一为空时人机验证功能自动禁用。                                                                                                                                                                                                          |
 | `TURNSTILE_SECRET`        | 可选               | 无                       | Cloudflare Turnstile 人机验证的服务端 Secret Key，用于校验前端回传的人机验证 Token。                                                                                                                                                                                                               | **敏感密钥，建议保存为 Secret 类型**。开启后可有效拦截自动化扫描脚本、批量机器人和恶意滥用。默认不部署（自行选择加入）；经 Git/CLI 部署的实例建议用 Dashboard Secret 类型配置——Secret 不受 wrangler 部署覆盖。                                                                                    |
@@ -244,6 +248,21 @@ Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流�
 >
 > 1. **Secret 安全存储**：在 Cloudflare Dashboard 的 _Settings → Variables and Secrets_ 中，强烈建议将所有包含密码、Secret、Key 等敏感凭据的变量统一选择为 **Secret** 类型。Secrets 存储在 Cloudflare 独立加密存储层中，重新构建和部署 Worker 时不会被代码覆盖。
 > 2. **预留变量说明**：代码中保留了 `MAX_CONNECTIONS` 环境变量接口定义，当前版本暂未读取生效，请勿依赖。
+
+</details>
+
+#### 可选：启用 Cloudflare Zero Trust Access 登录
+
+不想配置 GitHub OAuth，也不想记住固定密码？可以在 Cloudflare 控制台直接为 Worker 一键开启 Cloudflare Access，支持通过 Cloudflare 账号授权、邮箱一次性验证码（One-Time PIN）或团队 IdP 免密登录：
+
+1. **进入 Access 配置**：在 Cloudflare Dashboard ➔ **Workers 和 Pages** ➔ 点击你的 Worker（如 `cloudssh`）➔ 点击顶部的 **Access** 选项卡。
+2. **启用策略**：在 Worker 策略卡片中点击启用或管理策略，添加允许访问的规则（例如指定具体的个人邮箱、邮箱域名后缀 `@company.com` 或已绑定的登录提供商），保存生效。
+3. **打开站点**：访问 CloudSSH 站点，完成 Cloudflare Access 身份验证后即可直接进入系统！
+   - **零手动配置**：系统自动感知 Cloudflare 边缘鉴权标头，无需手动在 Worker 中填写复杂的团队域名或 AUD 密钥。
+   - **多租户数据隔离**：每个通过验证的邮箱自动分配独立的云端数据库切片，多成员使用互不影响。
+   - **单点注销**：点击退出登录自动重定向至 Cloudflare 官方注销端点 `/cdn-cgi/access/logout`，清理 Access 边缘会话。
+
+> **多认证模式优先级说明**：`ADMIN_PASSWORD_HASH`（密码优先） > `CF_ACCESS` / 自动感知（Access 模式） > `GitHub OAuth` > 匿名模式。若同时开启，以更高优先级的模式为准。
 
 #### 可选：启用单管理员密码登录（替代 GitHub OAuth）
 
@@ -338,7 +357,7 @@ SSH 跳转不需要额外环境变量，但必须启用 GitHub OAuth 并使用�
 
 ##### 通过 Cloudflare 隧道连接内网服务器
 
-在添加/编辑服务器时，选择**“Cloudflare 隧道”**连接模式，可直接穿透连接无公网 IP、无开放端口的私有内网服务器（如家庭宽带 NAS、局域网机器、私有开发机），免除端口映射或跳板机配置：
+在添加/编辑服务器时，选择**Cloudflare 隧道**连接模式，可直接穿透连接无公网 IP、无开放端口的私有内网服务器（如家庭宽带 NAS、局域网机器、私有开发机），免除端口映射或跳板机配置：
 
 1. **内网服务器配置 cloudflared**：在内网服务器运行 Cloudflare Tunnel，将配置好的公开主机名指向本地 SSH 端口（例如 `service: ssh://localhost:22`）。
 2. **在 CloudSSH 添加服务器**：
@@ -348,10 +367,10 @@ SSH 跳转不需要额外环境变量，但必须启用 GitHub OAuth 并使用�
    - **Zero Trust 访问凭据 (可选)**：若在 Zero Trust 中为该域名开启了 Access 策略，需填入 Service Token 的 Client ID 与 Client Secret；若后续不再需要，支持一键清除已存密钥。
 3. **连接与体验**：连接成功后状态栏会呈现 `CF-XXX`（Cloudflare 到内网隧道握手耗时）与 `RTT`（浏览器到 Cloudflare 边缘耗时）双段延迟，SSH 终端、SFTP 在线编辑与 AI Agent 全量无缝复用。
 
-### AI Agent：Responses API 配置与会话
+#### AI Agent：Responses API 配置与会话
 
 - **协议规范与服务商兼容现状**：
-  - **通用兼容支持**：主任务与上下文紧凑化仅需服务商支持标准 `/responses` 规范与函数工具调用，原生支持 OpenAI 官方（`gpt-4o`、`o1`、`o3-mini` 等）、Azure OpenAI、OpenRouter 以及各类标准 Responses 中转网关。
+  - **通用兼容支持**：主任务与上下文紧凑化仅需服务商支持标准 `/responses` 规范与函数工具调用，原生支持 OpenAI 官方、Azure OpenAI、OpenRouter 以及各类标准 Responses 中转网关。
   - **不兼容的接口**：目前仅提供传统 Chat Completions（`/v1/chat/completions`）的接口不可用。
   - **详细说明**：[本地上下文紧凑化与长期记忆](docs/agent-context-memory.md)。
 - **配置与升级指引**：在 AI 设置中填写 HTTPS API 根地址（如 `https://api.openai.com/v1`）或完整 `/responses` 地址、模型及密钥；旧 `/chat/completions` 地址需手动改为根地址。更换地址必须重新填写密钥。

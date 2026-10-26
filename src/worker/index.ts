@@ -12,6 +12,7 @@ import {
 import { ALLOWED_LOCATION_HINTS, type Env, type SSHConnectionConfig } from '../types';
 import {
   getAuthenticatedUser,
+  getCFAccessEmail,
   handleGetMe,
   handleGitHubAuth,
   handleGitHubCallback,
@@ -25,7 +26,7 @@ import {
   verifyTurnstile,
   LOCAL_ADMIN_GITHUB_ID,
 } from './auth';
-import { HTML } from './html';
+import { createHtmlResponse } from './html-cache';
 import { handleVersionCheck } from './version-check';
 
 export { SSHSessionDO } from './durable-object';
@@ -359,15 +360,17 @@ export default {
 
       // Return config info (includes GitHub auth availability)
       if (url.pathname === '/api/config') {
-        const authMode = resolveAuthMode(env);
+        const authMode = resolveAuthMode(env, request);
+        const cfAccessEmail = getCFAccessEmail(request);
         return Response.json({
           turnstileEnabled: !!env.TURNSTILE_SECRET,
           sitekey: env.TURNSTILE_SITEKEY || '',
-          // 密码模式下 GitHub 入口被权威禁用（即使凭据仍留在变量里，功能确实是关闭的）
+          // 密码模式/CF Access 模式下 GitHub 入口被禁用
           githubAuthEnabled: authMode === 'github',
-          githubAuthRequired: isGitHubAuthRequired(env),
+          githubAuthRequired: isGitHubAuthRequired(env) || authMode === 'cf_access',
           sshSharingEnabled: isSSHSharingEnabled(env),
           authMode,
+          cfAccessEmail,
           // 浏览器预拉伸公开参数（盐非机密）；坏哈希时为 null
           passwordAuth: authMode === 'password' ? getPasswordAuthParams(env) : null,
           passwordHashInvalid:
@@ -375,15 +378,7 @@ export default {
         });
       }
 
-      return new Response(HTML, {
-        headers: {
-          'Content-Type': 'text/html;charset=UTF-8',
-          'X-Content-Type-Options': 'nosniff',
-          'X-Frame-Options': 'DENY',
-          'Referrer-Policy': 'strict-origin-when-cross-origin',
-          'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
-        },
-      });
+      return createHtmlResponse(request);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error('Unhandled error in fetch handler:', msg);

@@ -14,7 +14,7 @@
 
 CloudSSH is a serverless Web SSH terminal built on Cloudflare Workers. Users connect to SSH servers through a browser-based terminal UI with integrated SFTP file management and AI Agent assistant.
 
-当前版本：`2.8.3`；根目录与 `frontend/package.json` 版本必须同步，更新说明见 `CHANGELOG.md`。
+当前版本：`2.9.0`；根目录与 `frontend/package.json` 版本必须同步，更新说明见 `CHANGELOG.md`。
 
 ## Architecture
 
@@ -30,6 +30,7 @@ CloudSSH is a serverless Web SSH terminal built on Cloudflare Workers. Users con
 src/
 ├── worker/           # Cloudflare Worker entry and Durable Objects
 │   ├── index.ts      # Main worker entry (request routing, bounded in-memory SSH rate limiting)
+│   ├── html-cache.ts # HTML ETag 计算与 304 协商缓存响应构造
 │   ├── version-check.ts # 官方 main 版本检查、有界读取与缓存
 │   ├── durable-object.ts  # SSHSessionDO - manages SSH sessions
 │   ├── share-do.ts    # SSHShareDO - one-time capability lifecycle and share-only audit log
@@ -59,7 +60,7 @@ src/
 │   │   ├── checkpoint.ts # 标准 Responses 摘要早期对话并保留近期交互
 │   │   ├── memory-provider.ts # 读取服务器记忆、提交会话供后台提炼
 │   │   ├── memory.ts     # 单次 LLM 提炼自然语言工作历程与可复用知识
-│   │   ├── tools.ts      # 8 tool definitions, including read-only fetch_web_content
+│   │   ├── tools.ts      # 10 tool definitions, including read_file, write_file and read-only fetch_web_content
 │   │   ├── tool-executor.ts  # Tool dispatch, blocked command rejection, bounded SSRF-safe web reads
 │   │   ├── prompt.ts     # System prompt, long-task decomposition and step-by-step verification
 │   │   ├── safety.ts     # Two-layer security: blocked patterns + confirmation patterns
@@ -438,6 +439,8 @@ release: 发布 vX.Y.Z <主题>版本（如 `release: 发布 v1.10.2 工作流�
 43. **前端微交互、弹簧引擎与移动端手势边界** - 统一 Spring 物理弹簧引擎（`frontend/src/spring.ts`）通过 Euler 数值积分求解刚度与阻尼，提供 `snapTo` 与 `settled`，供主题/抽屉液态分段器与各类微交互共享，严禁私自重复实现；抽屉面板移动端触摸右滑关闭（`frontend/src/drawer-swipe.ts`）严格以 `headerSelector` 限定在头部，规避 iOS Safari 屏幕左缘系统返回手势冲突，且与列表纵向滚动明确隔离（纵向位移判定后即刻交还原生滚动），关闭时统一路由原面板的 `hide()`/`close()` 语义，保持在途传输中断（AGENTS.md #37）与清理逻辑；主视图切换过渡（`#terminal-section`）必须保持仅纯透明度淡入，严禁添加带 `transform` 的动画以防破坏其内部 `position: fixed` 抽屉面板的包含块（containing block）基准；所有微动效全量接入 `@media (prefers-reduced-motion: reduce)` 与 `data-ui-motion` 档位收敛；卡片指针聚光灯通过 rAF 节流直接写入 CSS 变量并在粗指针设备上跳过注册；骨架屏必须携带 `aria-busy` 与 `aria-hidden` 无障碍属性；SFTP 列表仅在行数 ≤150 时启用交错入场动画以防大目录并发卡顿。
 
 44. **可选版本更新提示** - 运行版本从根 `package.json` 构建时导入（根/前端版本保持同步），与官方 `main/package.json` 的稳定 SemVer 数值比较，不按字符串或提交数比较，不依赖 GitHub Releases/Tags，也不提示降级或预发布版本。`GET /api/version` 只向固定官方 raw GitHub URL 请求公开版本元数据（不转发用户头部/凭据；必须使用 Workers 支持的 `redirect: 'manual'` 并拒绝 3xx，不得使用会在 Workers 中直接抛错的 `'error'` 模式），读取上限 16KiB、4s 超时，Worker isolate 去重/缓存并使用 Cloudflare fetch 缓存；成功缓存 6h、失败退避 15min，失败只返回 null。前端非阻塞同源读取，5s 超时，localStorage/内存缓存与跨标签页忽略同步；可见页面按缓存到期检查，隐藏/离线不检查，恢复可见/在线时重试。连接页在“连接参数”标题后展示紧凑版本徽标及可忽略的小提示，不再单独占用底部空间；标题区支持三语与窄屏自然换行，不能挤压语言切换或溢出卡片。用户空间/桌面终端仍使用页脚，移动终端放进“更多”菜单，分享认领页不检查；忽略仅针对该新版，下一个新版可再次提示。不弹窗、不自动更新/刷新/跳转、不影响 SSH/SFTP/Agent；更新日志链接为固定官方地址，三语文案随语言切换。
+
+45. **Cloudflare Zero Trust Access 认证模式** - 支持在 Cloudflare Dashboard 一键为 Worker 启用 Access（如 Email OTP 邮箱验证码登录）。Worker 自动感知已认证的 `Cf-Access-Authenticated-User-Email` 标头（该标头受 Cloudflare 边缘代理权威保护，外部伪造会被入口清洗），生成固定 `<=40` 字符的确定性路由键 `cf:<sanitized-prefix>-<hash>` 路由至专属 UserDBDO 实例（`github_id = -2`），实现多租户物理行级隔离；模式优先级：`ADMIN_PASSWORD_HASH`（密码优先） > `cf_access`（Access 自动感知） > `github` / 匿名；前端自动展示邮箱与首字母头像，退出登录重定向至 `/cdn-cgi/access/logout` 单点注销。
 
 ## SSH 兼容增强边界
 
