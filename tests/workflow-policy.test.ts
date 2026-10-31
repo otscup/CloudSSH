@@ -14,7 +14,7 @@ describe('Fork 工作流执行策略', () => {
     (file) => {
       const jobs = readWorkflow(file).split('\njobs:\n')[1] ?? '';
       const jobHeaders = jobs.match(/^  [\w-]+:$/gm) ?? [];
-      const ownerGuards = jobs.match(/^    if: github\.repository_owner == 'newbietan'$/gm) ?? [];
+      const ownerGuards = jobs.match(/^    if: (?:github\.repository_owner == 'newbietan'$|>-\n      github\.repository_owner == 'otscup')/gm) ?? [];
       expect(jobHeaders.length).toBeGreaterThan(0);
       expect(ownerGuards).toHaveLength(jobHeaders.length);
     }
