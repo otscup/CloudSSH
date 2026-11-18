@@ -65,7 +65,7 @@ export interface RemoteEditorOptions {
 export interface RemoteEditorHandle {
   isDirty(): boolean;
   getContent(): string;
-  markSaved(): void;
+  markSaved(content?: string): void;
   focus(): void;
   close(): void;
 }
@@ -314,7 +314,6 @@ class RemoteEditor implements RemoteEditorHandle {
     dialog.setAttribute('aria-label', t('sftp.editorTitle', { name: this.options.filename }));
 
     // 静态模板，动态内容（文件名/路径）一律 textContent 写入
-    // pi-lens-ignore: no-inner-html, ts-xss-dom-sink
     dialog.innerHTML = `
       <div class="remote-editor__panel">
         <div class="remote-editor__header">
@@ -394,8 +393,8 @@ class RemoteEditor implements RemoteEditorHandle {
     return this.view.state.doc.toString();
   }
 
-  markSaved(): void {
-    this.baseline = this.view.state.doc.toString();
+  markSaved(content = this.getContent()): void {
+    this.baseline = content;
     this.updateStatus();
   }
 
@@ -450,9 +449,10 @@ class RemoteEditor implements RemoteEditorHandle {
     this.saveButton.disabled = true;
     const savedLabel = this.saveButton.textContent;
     this.saveButton.textContent = t('sftp.editorSaving');
+    const content = this.getContent();
     try {
       const ok = await this.options.onSave();
-      if (ok) this.baseline = this.view.state.doc.toString();
+      if (ok) this.baseline = content;
     } finally {
       this.saving = false;
       this.saveButton.disabled = this.options.readOnly || !this.isDirty();

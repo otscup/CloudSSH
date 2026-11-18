@@ -18,6 +18,7 @@
     <a href="CHANGELOG.md">更新日志</a> ·
     <a href="#contributors">贡献者</a> ·
     <a href="#sponsor">赞助支持</a> ·
+    <a href="#special-thanks">特别感谢</a> ·
     <a href="#license">开源协议</a>
   </p>
   <p>
@@ -62,6 +63,7 @@
   - [本地开发](#本地开发)
 - [贡献者](#contributors)
 - [赞助支持](#sponsor)
+- [特别感谢](#special-thanks)
 - [开源协议](#license)
 
 </details>
@@ -106,10 +108,13 @@
 - **一次性 SSH 授权分享**：可选启用登录用户的服务器分享。链接只包含 256 位随机能力凭证，不携带主机、用户名、密码、私钥或跳板信息；凭证仅保存哈希、只能领取一次且具有独立的领取有效期与会话最长时间。分享会话允许终端和 SFTP，服务端强制禁用 AI Agent、OS 检测、主机指纹修改与自动重连；所有者可以实时撤销，并查看仅针对分享会话生成的生命周期、SFTP 操作与终端输出记录。
 - **防范中间人攻击 (TOFU)**：首次连接自动提取服务器 Host Key（SHA-256 指纹）并显示，支持 Ed25519/ECDSA/RSA 签名验证，并在本地及 API 持久化缓存已知主机指纹以防范二次连接的欺骗风险。
 - **全功能极客终端**：基于 `@xterm/xterm` 与 `@xterm/addon-webgl` 硬件加速渲染引擎，保证海量日志输出顺滑不卡顿。
-- **可靠的终端剪贴板交互**：鼠标完成终端选区后自动复制，右键可直接粘贴；触摸设备点击快捷键栏的复制按钮进入选择模式，拖动选择文本后再次点击完成复制，避免依赖不稳定的长按选区，粘贴则使用独立按钮。粘贴统一经过 xterm.js 原生输入管线，仅在远端应用启用 bracketed paste 模式时发送对应控制序列，并自动规范化换行，兼容 Vim 等交互式编辑器和普通 Shell。
+- **可靠的终端剪贴板交互**：鼠标完成终端选区后自动复制，右键可直接粘贴；触摸设备通过「选择」进入选区模式，可拖动起止手柄精确调整、在屏幕上下边缘自动滚动历史，并通过独立的复制/取消操作栏结束选择；仅选择模式隔离原生长按菜单。粘贴使用独立按钮，浏览器无法读取剪贴板时提供不持久化、绑定当前会话的手动粘贴框（最多 65,536 字符，多行可能执行命令）。粘贴统一经过 xterm.js 原生输入管线，仅在远端应用启用 bracketed paste 模式时发送对应控制序列，并自动规范化换行，兼容 Vim 等交互式编辑器和普通 Shell。
+- **触屏精细操作**：「更多」提供 12–18px 终端字号调整/自动模式（本机记忆）与当前标签操作；SFTP 支持显式打开、多选勾选、全选与清空，继续复用原有编辑、串行下载及批量删除。有文件传输时，主动关闭抽屉、切换标签/抽屉或返回连接页会先确认中断；断线与销毁仍立即清理，不提供后台传输。使用方式和真机验收边界见 [移动端交互说明](docs/mobile-ux.md)。
 - **移动端终端适配**：针对手机和平板提供动态可视高度、软键盘与安全区适配（刘海屏/灵动岛 `env(safe-area-inset-*)` 动态计算）、iOS 中文输入法兼容、紧凑工具栏、一次性 Ctrl/Alt、Esc/Tab/方向键/Home/End/PgUp/PgDn 等快捷键，以及移动端全屏 Agent/SFTP 面板。三大抽屉面板（SFTP、Agent、命令片段）支持头部触摸右滑手势关闭，避开 iOS 屏幕边缘系统手势且与列表纵向滚动无竞争；触屏优化按压缩放反馈、全局关闭原生点击灰闪，粗指针下自动将文件行高增至约 36px 提升触控精度，并为可滚动抽屉容器添加 `overscroll-behavior-y: contain` 阻断橡皮筋滚动穿透。窄屏下 AI Agent 头部与快捷提示词自适应折叠换行，完整呈现标题与提示词方块。页面从后台返回后会主动验证 WebSocket，淘汰表面在线但已失效的连接；匿名会话使用当前内存凭据重新建立 SSH，登录用户的已保存服务器则重新申请一次性连接令牌，且只有收到 `shell_ready` 后才恢复“已连接”状态和终端输入。用户可主动尝试“全屏横屏”；浏览器不支持方向锁定时会回退为手动旋转提示，不会强制改变桌面端布局。移动系统若彻底回收网页，当前 Shell 仍无法无缝续接。
-- **个性化 UI 与液态分段切换器**：Theme V4 系统提供 Standard Dark、Standard Light、Cyberpunk 以及参考 macOS 26 液态玻璃质感打造的 Liquid Glass 四款内置主题。用户空间顶栏与终端操作区升级为悬浮玻璃灵动岛与液态分段切换器（Liquid Segmented Controls），将 SFTP、自定义命令与 AI Agent 抽屉整合为单极药丸胶囊，配备共享一维物理弹簧引擎（`spring.ts`，基于 Euler 数值积分）驱动的 3D 液态透镜滑块，提供丝滑的互斥展开与收起体验。指针聚光灯（Specular Spotlight）泛化至全主题（rAF 节流传导 CSS 变量，触屏设备自动跳过以省电），新增服务器卡片与 SFTP 列表交错入场动效、冷加载骨架屏（含完整 ARIA 无障碍标记）、全局键盘 `:focus-visible` 主题色焦点环，并修复多层阴影组合语法规范。V4 支持渐变/网格背景层（含读性遮罩与缓慢漂移动画）、扫描线/闪烁/辉光/噪点效果注册表、独立表面模糊与提饱和档位（`saturate(180%)` + 镜面内发光）与版式缩放，全量动效支持 `prefers-reduced-motion` 与 `data-ui-motion` 降级，主体风格间差异显著。配套 [GitHub Pages 主题编辑器](https://newbietan.github.io/CloudSSH/theme-editor/)可实时调整颜色、形状、密度、字体、阴影、动效、背景层、效果及按钮/输入框/卡片/标签页样式，并预览登录页、服务器列表、终端 + SFTP 和 AI Agent 面板。分段条默认常驻 5 项（4 款内置 + 1 款自定义 Custom），移除了独立的上传按钮。用户点击 Custom 时若未上传过主题将自动弹出管理模态框引导上传，已激活状态下再次点击 Custom 可打开管理弹窗进行多套主题管理（支持色块预览、切换生效、删除确认，最多保存 20 套自定义主题）。登录用户自动通过云端跨设备同步多主题库，匿名用户本地保存在当前浏览器。
-- **SFTP 图形化文件管理**：集成完整的 SFTP v3 文件传输协议，提供图形化文件浏览器界面。工具栏支持路径面包屑分级导航（点击直达父级目录，点击空白切换绝对路径文本输入），列表支持按文件名、大小、修改时间双向排序（目录严格优先置顶）。支持一键新建空白文件并自动唤起 CodeMirror 在线编辑。支持目录浏览、文件上传/下载、新建文件夹、文件重命名与删除等操作；支持普通单选、`Cmd/Ctrl` 切换选择、`Shift` 连选、全选，以及批量下载文件和批量删除。双击文件智能处理（文本文件直接在线编辑，二进制/超大文件自动转串行下载）。内置 CodeMirror 在线编辑器，可直接编辑远端小文本文件（≤2MB，UTF-8 可编辑，GBK/GB18030 自动识别为只读），保留原文件换行符与 BOM，保存前自动检测远端修改并提示冲突确认，支持编辑器页脚自动换行动态切换与偏好持久化，常见配置（shell/YAML/JSON/Python/Markdown/HTML/CSS/Dockerfile/systemd 等）带语法高亮。基于 SSH 子系统实现，与终端会话并行运行，互不干扰，支持下载队列及上传取消。
+- **个性化 UI 与液态分段切换器**：Theme V4 系统提供 Standard Dark、Standard Light、Cyberpunk 以及参考 macOS 26 液态玻璃质感打造的 Liquid Glass 四款内置主题。用户空间顶栏与终端操作区升级为悬浮玻璃灵动岛与液态分段切换器（Liquid Segmented Controls），将 SFTP、自定义命令与 AI Agent 抽屉整合为单极药丸胶囊，配备共享一维物理弹簧引擎（`spring.ts`，基于 Euler 数值积分）驱动的 3D 液态透镜滑块，提供丝滑的互斥展开与收起体验。指针聚光灯（Specular Spotlight）泛化至全主题（rAF 节流传导 CSS 变量，触屏设备自动跳过以省电），新增服务器卡片与 SFTP 列表交错入场动效、冷加载骨架屏（含完整 ARIA 无障碍标记）、全局键盘 `:focus-visible` 主题色焦点环，并修复多层阴影组合语法规范。V4 支持渐变/网格背景层（含读性遮罩与缓慢漂移动画）、扫描线/闪烁/辉光/噪点效果注册表、独立表面模糊与提饱和档位（`saturate(180%)` + 镜面内发光）与版式缩放，全量动效支持 `prefers-reduced-motion` 与 `data-ui-motion` 降级，主体风格间差异显著。背景漂移采用独立裁剪层与预绘制纹理的 `transform` 合成，减少主线程重绘而不削弱玻璃材质、模糊或光晕。配套 [GitHub Pages 主题编辑器](https://newbietan.github.io/CloudSSH/theme-editor/)可实时调整颜色、形状、密度、字体、阴影、动效、背景层、效果及按钮/输入框/卡片/标签页样式，并预览登录页、服务器列表、终端 + SFTP 和 AI Agent 面板。分段条默认常驻 5 项（4 款内置 + 1 款自定义 Custom），移除了独立的上传按钮。用户点击 Custom 时若未上传过主题将自动弹出管理模态框引导上传，已激活状态下再次点击 Custom 可打开管理弹窗进行多套主题管理（支持色块预览、切换生效、删除确认，最多保存 20 套自定义主题）。登录用户自动通过云端跨设备同步多主题库，匿名用户本地保存在当前浏览器。
+- **本地字体与图标**：Material Symbols Outlined 与 JetBrains Mono 随项目分发，主站内联到单 HTML，主题编辑器使用同源字体，不再依赖 Google Fonts；普通构建不下载字体。这并非整站离线化，认证、SSH 等联网功能保持不变。来源、许可证与裁剪维护步骤见[字体本地化说明](docs/local-fonts.md)。
+- **响应式服务器表单**：新增、编辑和克隆弹窗在宽屏采用双栏布局，名称/标签并排、连接/认证分栏；窄屏、短窗口与大字号下保留字段区滚动，标题和保存按钮始终可达。四个内置主题与自定义主题共用布局，服务器表单及匿名连接页均完整显示五位端口，并保留原生数字控件和端口校验。
+- **SFTP 图形化文件管理**：集成完整的 SFTP v3 文件传输协议，提供图形化文件浏览器界面。列表使用父容器事件委托与选区差量更新，减少大目录下的重复监听器和 DOM 写入，保留完整列表与既有选择行为。工具栏支持路径面包屑分级导航（点击直达父级目录，点击空白切换绝对路径文本输入），列表支持按文件名、大小、修改时间双向排序（目录严格优先置顶）。支持一键新建空白文件并自动唤起 CodeMirror 在线编辑。支持目录浏览、文件上传/下载、新建文件夹、文件重命名与删除等操作；支持普通单选、`Cmd/Ctrl` 切换选择、`Shift` 连选、全选，以及批量下载文件和批量删除。双击文件智能处理（文本文件直接在线编辑，二进制/超大文件自动转串行下载）。内置 CodeMirror 在线编辑器，可直接编辑远端小文本文件（≤2MB，UTF-8 可编辑，GBK/GB18030 自动识别为只读），保留原文件换行符与 BOM，保存前自动检测远端修改并提示冲突确认，支持编辑器页脚自动换行动态切换与偏好持久化，常见配置（shell/YAML/JSON/Python/Markdown/HTML/CSS/Dockerfile/systemd 等）带语法高亮。基于 SSH 子系统实现，与终端会话并行运行，互不干扰，支持下载队列及上传取消。
 - **原生文件传输**：集成 [trzsz.js](https://github.com/trzsz/trzsz.js)，支持 `trz`（上传）/ `tsz`（下载）命令进行文件传输，兼容 tmux 会话。还支持拖拽文件到终端窗口直接上传、目录传输及断点续传等高级功能。（需远程服务器安装 [trzsz](https://trzsz.github.io/)）
 - **多语言界面**：内置简体中文、繁體中文与英文三套 UI 词条，自动跟随浏览器语言并提供手动切换，选择通过 URL 参数或本地存储（`cloudssh_locale`）持久化。
 - **GitHub OAuth 集成**：支持 GitHub 登录，用户可保存和管理常用 SSH 服务器，实现一键连接；支持服务器配置一键克隆（Duplicate Server，快速复制参数并清空凭据）；服务器支持最多 10 个规范化标签，列表可按名称、主机地址、用户名即时搜索并按标签筛选，分页随设备自适应（桌面与平板每页 6 张、移动端 3 张卡片）。
@@ -127,7 +132,13 @@
   - **可读工作历程与简单后台重试**：LLM 从普通会话生成自然语言工作总结和可复用知识，连续工作可在 30 分钟内合并。会话写入 SQLite，由 UserDBDO Alarm 提炼；断线或实例重建后仍可处理。首次失败后最多再重试三次，成功或耗尽后删除任务。没有独立证据包、执行账本、双队列、回执或通知轮询。详见[上下文与记忆说明](docs/agent-context-memory.md)。
   - **长任务上下文摘要**：接近模型容量时，通过标准 `/responses` 摘要较早对话，保留近期完整工具交互继续；不依赖 `/responses/compact`。默认上下文/输出预算为 64,000/8,192 Token，可按模型调整；修改后新建 Agent 会话。
   - **兼容与诊断**：模型能力因服务商而异，仅对明确不支持的可选参数做有界兼容；不执行未完成的工具调用。普通错误简短显示，详细诊断仅在 `DEBUG_MODE=true` 时输出网页终端。模型配置保留自定义下拉选择、同地址已存密钥拉取模型列表及 Base URL 绑定。请求使用 `store:false`，实际留存政策仍需核对服务商。
-- **工程质量门禁**：GitHub Actions 在 `test` 与 `main` 分支部署前依次执行冻结锁文件安装、Worker/前端类型检查、单元与集成测试、可复现前端构建、Playwright 浏览器 E2E 和 axe 无障碍回归；任一环节失败都会阻止部署。
+- **工程质量门禁**：GitHub Actions 在 `test` 与 `main` 分支部署前依次执行冻结锁文件安装、Worker/前端类型检查、单元与集成测试、可复现前端构建、Playwright 浏览器 E2E 和 axe 无障碍回归；任一环节失败都会阻止部署。指向 `test`/`main` 的 PR 和手动运行同样执行验证，但不会部署或注入 Cloudflare 部署凭据；只有对应分支的 push 才按测试/生产环境分流部署。
+
+### 外部 AI 助手（MCP）
+
+登录后点击连接节点形状的「外部AI助手MCP设置」图标，可为 Claude Code、Cursor 等客户端生成账户唯一的长期 MCP 配置，按服务器独立调整权限并随时重复复制，不提供撤销入口，通过 `https://你的实例/mcp` 使用独立命令执行和有界 SFTP 文本操作。终端标签页可主动共享最近输出；网页面板的近期操作默认折叠，短空闲后自动释放连接。
+
+执行权限是明确预授权，不是只读沙箱或逐条网页审批；不接管交互终端，不导出保存的 SSH 凭据。需要先确认所有跳的主机指纹，不支持需人工认证或浏览器临时 CA 私钥的服务器。Cloudflare Access 登录会显示专属 Service Token / Service Auth 引导，填写凭据后生成同时携带 Access 与个人 Token 的客户端配置；个人令牌与 Access 凭据按账户加密保存以便重复复制，密钥仍在同一数据库，并非独立 KMS。旧摘要令牌需首次重新生成配置。其他登录模式不展示该引导。配置、限制和新增 DO 迁移见 [MCP 接入说明](docs/mcp.md)。
 
 </details>
 
@@ -199,13 +210,11 @@ flowchart TB
 4. **访问应用**：部署成功后，可通过默认域名 `https://cloudssh.<你的子域>.workers.dev` 访问。
 5. **绑定自定义域名**（可选）：进入 Worker 的 Settings → Domains & Routes → Add，输入你的域名并确认。
 
-> **说明**：如需部署 test 环境，可 Fork 后在 `test` 分支上重复上述步骤，创建独立的 Worker（如 `cloudssh-test`）。两个环境的 Durable Objects 数据完全隔离，各自独立。
+若需按文件路径跳过 Cloudflare Git 自动构建，请在 Worker 的 **Settings → Build → Build watch paths** 配置包含/排除规则，参见 [官方说明](https://developers.cloudflare.com/workers/ci-cd/builds/build-watch-paths/)。此设置与 GitHub Actions 的 `paths-ignore` 相互独立。
 
 ##### 版本更新提示
 
 项目会在后台检查官方 `main` 分支的最新稳定版本；有新版时，同处显示可忽略的小提示。点击可查看更新日志，升级由部署者自行选择同步仓库并重新部署；不会自动刷新、强制升级或中断当前会话。忽略仅针对该版本，下个新版仍可提示。
-
-检查由 Worker 向固定的官方 GitHub 地址读取公开版本号，不向 GitHub 发送用户凭据或服务器信息。成功检查缓存 6 小时，失败静默退避 15 分钟；网络不可用时不影响正常使用。
 
 ##### 可选：自动同步上游最新版本（自动更新）
 
@@ -236,7 +245,7 @@ Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流�
 | `BASE_URL`                | 启用登录时必填     | 无                       | 部署站点的完整公网访问根地址（如 `https://ssh.example.com`），用于生成 OAuth 授权回调跳转。                                                                                                                                                                                                        | 域名必须与 GitHub OAuth App 中的 Authorization callback URL 完全一致，末尾**不要**加斜杠 `/`。未配置时降级使用请求上下文 Host。                                                                                                                                                                   |
 | `GITHUB_ALLOWED_USER_IDS` | 可选               | 无（不限制）             | 允许登录系统的 GitHub **数字用户 ID** 白名单列表，多个 ID 以英文逗号分隔（如 `83105156,6236783`）。                                                                                                                                                                                                | **私有化部署核心防线**。未配置时任何 GitHub 用户均可登录；一旦配置，仅白名单用户允许登录（fail-closed 机制）。数字 ID 可访问 `https://api.github.com/users/<username>` 查看 `id` 字段获取。                                                                                                       |
 | `ADMIN_PASSWORD_HASH`     | 启用密码登录时必填 | 无                       | 单管理员密码登录凭据（格式：`pbkdf2$sha256$<迭代数>$<盐>$<校验值>`，用自定义密码在浏览器内生成——匿名实例页尾入口或任意实例 `#password-setup` 路由——或本地 `pnpm run hash-password`）。非空即启用密码模式：与 GitHub 登录互斥且优先级更高，全实例仅本地管理员一个账号，功能与 GitHub 登录完全一致。 | **敏感凭据，务必设为 Secret 类型**。置空/删除即刻退回 GitHub 登录模式（GitHub 配置与数据零影响）；换新值 = 修改密码（所有已登录会话立即失效）。密码模式不改变匿名 SSH 行为，需强制登录请配合 `REQUIRE_GITHUB_AUTH=true`；公网部署建议同时开启 Turnstile 防爆破。                                  |
-| `CF_ACCESS`               | 可选               | 自动感知                 | Cloudflare Zero Trust Access 认证模式开关。在控制台 Worker 详情页的「Access」选项卡中启用策略即可自动生效，亦可显式设为 `true`。                                                                                             | 开启后无需配置 GitHub OAuth 或密码，直接通过 Cloudflare Access（如账号授权、邮箱验证码等）登入系统。多用户天然隔离。                                                                                                            |
+| `CF_ACCESS`               | 可选               | 自动感知                 | 检测到运行时已验证的 Access 身份时自动启用；显式设为 `true` 时缺少该身份即拒绝登录。                                                                                                                                                                   | 开启后无需配置 GitHub OAuth 或密码，直接通过 Cloudflare Access（如账号授权、邮箱验证码等）登入系统。多用户天然隔离。                                                                                                                                                                              |
 | `REQUIRE_GITHUB_AUTH`     | 可选               | `false`                  | 是否强制登录后才可使用 SSH 终端（GitHub 或单管理员密码会话均满足）。设为 `true` 时彻底禁用匿名直连入口。                                                                                                                                                                                           | **公网部署防被蹭推荐开启**。若不希望未授权访客将你的 Worker 用作公开 SSH 代理节点，建议配置为 `true` 并配合白名单使用。wrangler.toml `[vars]` 随部署默认下发，自定义请改配置文件。                                                                                                                |
 | `TURNSTILE_SITEKEY`       | 可选               | 无                       | Cloudflare Turnstile 人机验证的前端公开 Site Key。                                                                                                                                                                                                                                                 | 公开密钥。与 `TURNSTILE_SECRET` 配合使用，在未配置或配置任一为空时人机验证功能自动禁用。                                                                                                                                                                                                          |
 | `TURNSTILE_SECRET`        | 可选               | 无                       | Cloudflare Turnstile 人机验证的服务端 Secret Key，用于校验前端回传的人机验证 Token。                                                                                                                                                                                                               | **敏感密钥，建议保存为 Secret 类型**。开启后可有效拦截自动化扫描脚本、批量机器人和恶意滥用。默认不部署（自行选择加入）；经 Git/CLI 部署的实例建议用 Dashboard Secret 类型配置——Secret 不受 wrangler 部署覆盖。                                                                                    |
@@ -253,14 +262,13 @@ Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流�
 
 #### 可选：启用 Cloudflare Zero Trust Access 登录
 
-不想配置 GitHub OAuth，也不想记住固定密码？可以在 Cloudflare 控制台直接为 Worker 一键开启 Cloudflare Access，支持通过 Cloudflare 账号授权、邮箱一次性验证码（One-Time PIN）或团队 IdP 免密登录：
+可以通过 Cloudflare Access 的账号授权、邮箱一次性验证码（One-Time PIN）或团队 IdP 登录，无需另配 GitHub OAuth 或固定密码：
 
-1. **进入 Access 配置**：在 Cloudflare Dashboard ➔ **Workers 和 Pages** ➔ 点击你的 Worker（如 `cloudssh`）➔ 点击顶部的 **Access** 选项卡。
-2. **启用策略**：在 Worker 策略卡片中点击启用或管理策略，添加允许访问的规则（例如指定具体的个人邮箱、邮箱域名后缀 `@company.com` 或已绑定的登录提供商），保存生效。
-3. **打开站点**：访问 CloudSSH 站点，完成 Cloudflare Access 身份验证后即可直接进入系统！
-   - **零手动配置**：系统自动感知 Cloudflare 边缘鉴权标头，无需手动在 Worker 中填写复杂的团队域名或 AUD 密钥。
-   - **多租户数据隔离**：每个通过验证的邮箱自动分配独立的云端数据库切片，多成员使用互不影响。
-   - **单点注销**：点击退出登录自动重定向至 Cloudflare 官方注销端点 `/cdn-cgi/access/logout`，清理 Access 边缘会话。
+1. 可在 Worker 详情页的 **Access** 面板配置访问策略，或在 **Zero Trust → Access → Applications** 创建 **Self-hosted** 应用。确保实际生效的策略覆盖 CloudSSH 站点的页面、`/api/*` 和 WebSocket 路径，不要只保护登录页。
+2. 添加允许访问的邮箱或受控团队域名规则；其他可访问入口（包括 `workers.dev`）也须保护，不使用的入口应关闭。
+3. 访问站点完成 Access 验证。CloudSSH 从 Workers 运行时的 `ctx.access.getIdentity()` 获取已验证身份，自动按邮箱隔离用户库；不信任客户端传来的邮箱头或未经验证的 JWT。无需另配 AUD 或验证密钥，退出登录会转到 `/cdn-cgi/access/logout`。
+
+> **配置与连接检查**：从 Worker 面板配置 Access 后已能正常登录和连接 SSH 的实例，无需迁移到另一种配置方式。面板入口不等于实际生效的策略类型；[Cloudflare 官方文档](https://developers.cloudflare.com/workers/configuration/cloudflare-access/) 对 Worker-level 策略另有 WebSocket 限制说明，域名/路径策略也可能优先生效。若页面可访问而 SSH 返回 403，应核对生效策略、WebSocket 目标域名与路径、Origin 和登录会话，不要仅凭配置入口判断原因。`CF_ACCESS=true` 仅强制要求已验证的 Access 身份，不能代替边缘访问策略；缺少运行时身份时会拒绝登录。
 
 > **多认证模式优先级说明**：`ADMIN_PASSWORD_HASH`（密码优先） > `CF_ACCESS` / 自动感知（Access 模式） > `GitHub OAuth` > 匿名模式。若同时开启，以更高优先级的模式为准。
 
@@ -328,10 +336,6 @@ Fork 仓库可以按需使用内置的 `Sync upstream` GitHub Actions 工作流�
 | 仅配置 `REQUIRE_GITHUB_AUTH=true` | 所有 GitHub 用户 | 禁止                 |
 | 两项同时配置                      | 仅白名单用户     | 禁止（私有实例模式） |
 
-1. **重新部署**：保存环境变量后重新部署当前 Worker。仓库中的 Durable Object migration 会负责初始化所需类和数据库，不需要删除已有 Worker。
-
-> **访问策略说明**：修改 `GITHUB_ALLOWED_USER_IDS` 后，已签发 session 会在下一次请求时重新检查并立即失效；`REQUIRE_GITHUB_AUTH=true` 依赖 GitHub OAuth，请同时正确配置 Client ID、Client Secret 和 `BASE_URL`。
-
 ##### 使用一次性 SSH 分享
 
 1. 配置 GitHub OAuth，并在 Worker 环境变量中设置 `ENABLE_SSH_SHARING=true` 后重新部署。
@@ -366,6 +370,62 @@ SSH 跳转不需要额外环境变量，但必须启用 GitHub OAuth 并使用�
    - **连接区域**：建议根据内网主机的实际物理位置手动选择最近的区域（如亚洲内网选 `亚太地区`），促使 Durable Object 就近实例化，避免跨洋三角路由延迟；
    - **Zero Trust 访问凭据 (可选)**：若在 Zero Trust 中为该域名开启了 Access 策略，需填入 Service Token 的 Client ID 与 Client Secret；若后续不再需要，支持一键清除已存密钥。
 3. **连接与体验**：连接成功后状态栏会呈现 `CF-XXX`（Cloudflare 到内网隧道握手耗时）与 `RTT`（浏览器到 Cloudflare 边缘耗时）双段延迟，SSH 终端、SFTP 在线编辑与 AI Agent 全量无缝复用。
+
+##### 配置目标服务器使用 Cloudflare SSH CA
+
+仅在 CloudSSH 使用 Access 登录时提供 **Cloudflare CA**。浏览器临时生成密钥，由保护本站的 Access 应用签发短期证书；principal 是邮箱 `@` 前缀，CloudSSH 用户名则是已有 Unix 账户。以下以 Linux OpenSSH 为例，先替换 `<UNIX_USER>` 和 `<EMAIL_PREFIX>`；此认证不能作为跳板机凭据，也不能创建一次性分享。
+
+1. **获取正确的公钥**：进入 [Zero Trust](https://one.dash.cloudflare.com/) → **Access controls → Service credentials → SSH → Add a certificate**，选择保护 **CloudSSH 站点**的 Access 应用，生成并复制整行 **CA public key**。不要选 “SSH with Access for Infrastructure”。Access 策略只允许受信任的邮箱；不同域名的相同邮箱前缀会得到同名 principal，不能靠服务器映射区分。
+2. **备份并信任 CA**：保留当前 SSH 会话，备份 `/etc/ssh/sshd_config` 及即将修改的已有文件。用 `sudoedit /etc/ssh/cloudflare_ca.pub` 添加整行公钥，**保留已有公钥，不要清空文件或覆盖其他 CA**；设置属主 `root:root`、权限 `644`。如果已有 `TrustedUserCAKeys`，沿用其文件路径并添加新公钥。否则在主配置的全局区域（第一个 `Match` 之前）设置：
+
+   ```text
+   PubkeyAuthentication yes
+   TrustedUserCAKeys /etc/ssh/cloudflare_ca.pub
+   ```
+
+3. **映射已有用户名**：如果用户名与邮箱前缀不同，在 `/etc/ssh/sshd_config` **末尾**添加以下块，不要放到仍有全局指令的配置开头：
+
+   ```text
+   Match User <UNIX_USER>
+       AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+   ```
+
+   ```bash
+   sudo install -d -o root -g root -m 755 /etc/ssh/auth_principals
+   sudoedit /etc/ssh/auth_principals/<UNIX_USER>
+   # 在文件中添加一行 <EMAIL_PREFIX>，保留已有授权行，不写完整邮箱
+   sudo chown root:root /etc/ssh/auth_principals/<UNIX_USER>
+   sudo chmod 644 /etc/ssh/auth_principals/<UNIX_USER>
+   ```
+
+   已有 `Match` 或 `AuthorizedPrincipalsFile/Command` 时先核查生效配置，沿用原策略，不重复添加冲突指令。用户名等于前缀且没有其他 principal 限制时，可跳过映射。
+4. **检查后重载**：先执行以下命令，确认公钥认证为 `yes`，CA 路径正确；启用映射时 principal 路径应为上述路径，未启用时通常为 `none`：
+
+   ```bash
+   sudo sshd -t
+   sudo sshd -T -C user=<UNIX_USER> | grep -Ei 'pubkeyauthentication|trustedusercakeys|authorizedprincipalsfile|authorizedprincipalscommand'
+   # 确认结果正确后再执行；RHEL/CentOS 将 ssh 换为 sshd
+   sudo sshd -t && sudo systemctl reload ssh
+   ```
+
+   用新连接验证成功前，不要关闭原会话或禁用已有密码/密钥登录。CloudSSH 中用户名填 `<UNIX_USER>`，团队标识填 Zero Trust 团队名（不含 `.cloudflareaccess.com`），认证方式选 **Cloudflare CA**。
+
+失败时查看 `sudo journalctl -u ssh -n 30`（或 `sshd`）：`name is not a listed principal` 检查证书 principal、授权文件/命令及文件路径和权限；`Invalid user` 检查 Unix 账户；CA 不受信任则核对应用公钥，也检查证书有效期和服务器时间。
+
+<details>
+<summary><b>发给 AI 助手的配置提示词</b></summary>
+
+```text
+请帮我在 Linux OpenSSH 上配置 Cloudflare SSH CA，让一个已有 Unix 用户登录。先索取：Unix 用户名、Access 邮箱前缀、保护 CloudSSH 站点的 Access 应用的 CA 公钥整行（不要使用 SSH with Access for Infrastructure 的 CA）。不要索取 CA 私钥、JWT 或 Service Token。
+
+保留当前连接；检查现有 sshd_config、Include、Match 和 sshd -T 的有效值，备份要修改的已有文件。不要创建用户、改变端口、关闭现有登录方式，或覆盖原 CA/授权行。已有 TrustedUserCAKeys 时复用其文件并追加公钥，否则使用 /etc/ssh/cloudflare_ca.pub（root:root、644），在第一个 Match 前配置 PubkeyAuthentication yes 和 TrustedUserCAKeys。
+
+用户名与邮箱前缀不同时，复用原 principal 策略，或在主配置末尾添加 Match User <UNIX_USER> 及 AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u。授权文件每行一个允许的邮箱前缀，保留原授权；目录 755、文件 644，均 root:root。用户名已匹配且没有其他限制则不必映射。不要把 Match 块插到后面仍有全局指令的位置。
+
+先 sshd -t，再 sshd -T -C user=<UNIX_USER> 核对生效值；不通过就停止并恢复本次修改。确认后才用 sshd -t && systemctl reload ssh（RHEL/CentOS 用 sshd 服务）重载。验证新连接成功前保留原连接。提醒我 Access 规则须限制受信任邮箱，同名前缀不同域名不能仅凭 principal 区分。最后说明 CloudSSH 中应填的用户名、团队标识及常见排错步骤。
+```
+
+</details>
 
 #### AI Agent：Responses API 配置与会话
 
@@ -513,10 +573,15 @@ test 分支（开发/测试）  ──合并──>  main 分支（生产）
 | [TanXin (@newbietan)](https://github.com/newbietan)       | 项目发起与持续维护；Cloudflare Serverless、SSH/SFTP、AI Agent、安全体系、主题系统及工程化建设                            |
 | [David xu (@xqdoo00o)](https://github.com/xqdoo00o)       | Dropbear 兼容、trzsz 文件传输迁移、PTY 尺寸处理，以及会话退出与重连交互优化                                              |
 | [vonl1 (@vonl1)](https://github.com/vonl1)                | 终端选区自动复制、兼容 Vim 的右键粘贴体验、服务器 IPv4/IPv6 掩码与完整地址快捷复制，以及服务器操作系统自动识别与品牌图标 |
-| [Leon Xu (@xuthuslei)](https://github.com/xuthuslei)      | 修复 `SSH_MSG_NEWKEYS` 与首个加密包同批到达时的加密状态切换和数据包解析兼容问题；修复 v1.11.0 跳板认证时序回归（#108）   |
+| [Leon Xu (@xuthuslei)](https://github.com/xuthuslei)      | 提供 `SSH_MSG_NEWKEYS` 同批报文解析修复（[PR #88](https://github.com/newbietan/CloudSSH/pull/88)）与跳板认证时序修复（[PR #109](https://github.com/newbietan/CloudSSH/pull/109)） |
 | [DAVID TB (@tbdavid2019)](https://github.com/tbdavid2019) | 贡献繁体中文（台灣）界面与本地化词典，扩展前端语言切换与主题编辑器繁中支持（#147）                                       |
+| [Zhao Hailong (@GrothKeiran)](https://github.com/GrothKeiran) | 主站与主题编辑器的字体/图标本地化、图标子集裁剪脚本与清单、许可证及单 HTML 构建适配（[#188](https://github.com/newbietan/CloudSSH/pull/188)） |
 
-名单及贡献说明依据 Git 提交历史与已接收的 Pull Request 整理；同一贡献者在历史中可能使用过不同的 Git 作者名称或邮箱。完整记录请参阅 [GitHub Contributors](https://github.com/newbietan/CloudSSH/graphs/contributors)。欢迎通过 Issue 和 Pull Request 参与项目建设。
+以上名单记录通过 Pull Request 贡献的用户，贡献说明依据 PR 与实际采纳的改动整理。同一贡献者在历史中可能使用过不同的 Git 作者名称或邮箱。完整提交记录请参阅 [GitHub Contributors](https://github.com/newbietan/CloudSSH/graphs/contributors)。欢迎通过 Issue 和 Pull Request 参与项目建设。
+
+### 社区致谢
+
+同时感谢所有通过 Issue 报告问题、提出建议、参与讨论以及帮助测试和反馈的朋友。你们的支持持续推动 CloudSSH 改善兼容性、稳定性与使用体验。
 
 <a id="sponsor"></a>
 
@@ -529,6 +594,14 @@ test 分支（开发/测试）  ──合并──>  main 分支（生产）
 <a href="https://afdian.com/a/newbietan" target="_blank">
   <img src="https://pic1.afdiancdn.com/static/img/welcome/button-sponsorme.png" alt="在爱发电赞助我" width="200">
 </a>
+
+<a id="special-thanks"></a>
+
+## 特别感谢
+
+特别感谢以下朋友通过打赏支持 CloudSSH 的持续维护与开发，你们的鼓励是项目不断前进的动力！
+
+- <a href="https://github.com/shunia"><img src="https://github.com/shunia.png?size=80" width="40" height="40" alt="shunia" align="middle" /></a> [shunia](https://github.com/shunia) — 感谢你通过爱发电打赏支持本项目。
 
 <a id="license"></a>
 

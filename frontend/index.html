@@ -74,14 +74,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
     <meta name="color-scheme" content="dark light" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>CloudSSH</title>
-    <link
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap"
-      rel="stylesheet"
-    />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap"
-      rel="stylesheet"
-    />
+    <!-- 字体已本地化：见 frontend/src/assets/fonts/fonts.css 的 @font-face，不再请求 Google Fonts。 -->
     <link rel="stylesheet" href="/src/style.css" />
     <script
       src="https://challenges.cloudflare.com/turnstile/v0/api.js"
@@ -90,7 +83,37 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
     ></script>
   </head>
   <body class="min-h-screen font-body text-sm">
-    <div id="app">
+    <div class="app-background" aria-hidden="true"></div>
+    <!-- 运行时配置与身份确认前，应用内容不可见、不可聚焦，也不进入无障碍树。 -->
+    <div id="app-loading" class="min-h-screen flex items-center justify-center p-6">
+      <main class="w-full max-w-md text-center" aria-label="CloudSSH">
+        <div class="text-3xl font-bold text-primary tracking-tighter mb-8">CloudSSH</div>
+        <div class="cyber-box p-6 min-h-[320px] flex items-center justify-center">
+          <div
+            id="app-loading-status"
+            class="space-y-5 text-muted"
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            <span class="app-loading-spinner" aria-hidden="true"></span>
+            <p data-i18n="app.loading">正在加载配置与登录状态…</p>
+          </div>
+          <div id="app-loading-error" class="hidden space-y-5" role="alert">
+            <p class="text-muted" data-i18n="app.loadFailed">
+              暂时无法加载页面，请检查网络后重试。
+            </p>
+            <button
+              id="app-loading-retry"
+              type="button"
+              class="cyber-button text-primary px-5 py-2"
+              data-i18n="app.retry"
+            >重试</button>
+          </div>
+        </div>
+      </main>
+    </div>
+    <div id="app" hidden inert aria-hidden="true">
       <!-- Login Page (匿名连接) -->
       <div
         id="auth-section"
@@ -201,17 +224,19 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
             <div id="user-info" class="flex items-center gap-3">
               <!-- 动态渲染：头像 + 用户名 -->
             </div>
+            <button type="button" data-mcp-open class="user-space-menu-action assistant-icon-button hidden" data-i18n-title="mcp.title" data-i18n-aria-label="mcp.title" aria-label="External AI assistant MCP settings" title="External AI assistant MCP settings">
+              <span data-assistant-icon="mcp" aria-hidden="true"></span>
+              <span class="user-space-action-label" data-i18n="mcp.title">External AI assistant MCP settings</span>
+            </button>
             <button
               id="ai-config-btn"
               class="user-space-menu-action hover:opacity-80 transition-opacity cursor-pointer p-1 flex items-center justify-center"
               data-i18n-title="agent.settings"
+              data-i18n-aria-label="agent.settings"
+              aria-label="AI Agent settings"
               title="AI Agent 设置"
             >
-              <span
-                class="material-symbols-outlined"
-                style="font-variation-settings: 'FILL' 0"
-                >psychology</span
-              >
+              <span class="assistant-entry-icon" data-assistant-icon="agent" aria-hidden="true"></span>
               <span class="user-space-action-label" data-i18n="agent.settings"
                 >AI Agent 设置</span
               >
@@ -526,13 +551,13 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
       >
         <div class="modal-overlay absolute inset-0" id="modal-backdrop"></div>
         <div
-          class="responsive-modal-panel cyber-box p-6 shadow-2xl relative z-10 w-full max-w-md mx-4"
+          class="responsive-modal-panel server-modal-panel cyber-box p-6 shadow-2xl relative z-10 w-full"
         >
           <div
             class="theme-accent-line absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-[var(--accent-secondary)] to-transparent opacity-50"
           ></div>
           <div
-            class="flex items-center justify-between mb-6 pb-4 border-b border-dim"
+            class="server-modal-header flex items-center justify-between pb-4 border-b border-dim"
           >
             <span
               id="modal-title"
@@ -553,7 +578,9 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
               >
             </button>
           </div>
-          <form id="server-form" class="space-y-4">
+          <form id="server-form" class="server-modal-form">
+            <div class="server-modal-fields">
+            <div class="server-identity-fields">
             <div>
               <label
                 for="server-name"
@@ -599,13 +626,17 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 使用逗号分隔，最多 10 个标签
               </div>
             </div>
+            </div>
+            <div class="server-settings-columns">
+            <section class="server-settings-section" aria-labelledby="server-transport-label">
             <div>
               <label
+                id="server-transport-label"
                 class="block text-xs font-bold tracking-[0.1em] text-muted mb-2"
                 data-i18n="server.transportMode"
                 >网络连接</label
               >
-              <div class="flex gap-2 mb-1">
+              <div class="server-choice-tabs mb-1">
                 <button
                   type="button"
                   id="modal-transport-tab-direct"
@@ -624,8 +655,8 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 </button>
               </div>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-4 gap-4">
-              <div class="sm:col-span-3" id="server-host-field">
+            <div class="ssh-endpoint-fields">
+              <div class="ssh-host-field" id="server-host-field">
                 <label
                   for="server-host"
                   id="server-host-label"
@@ -644,7 +675,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                   />
                 </div>
               </div>
-              <div class="sm:col-span-1" id="server-port-field">
+              <div class="ssh-port-field" id="server-port-field">
                 <label
                   for="server-port"
                   class="block text-xs font-bold tracking-[0.1em] text-muted mb-2"
@@ -719,18 +750,30 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
             </div>
             <div
               id="server-cf-access-section"
-              class="hidden space-y-4 pt-2 pb-2 border-t border-b border-dim"
+              class="hidden pt-2 pb-2 border-t border-b border-dim"
             >
-              <div
-                class="text-[11px] font-bold tracking-[0.05em] text-[var(--accent-secondary)] flex items-center gap-1.5"
+              <button
+                type="button"
+                id="server-cf-access-toggle"
+                class="w-full text-left text-[11px] font-bold tracking-[0.05em] text-[var(--accent-secondary)] flex items-center gap-1.5 cursor-pointer"
+                aria-expanded="false"
+                aria-controls="server-cf-access-fields"
               >
                 <span class="material-symbols-outlined" style="font-size: 16px"
                   >security</span
                 >
-                <span data-i18n="server.cfAccessTitle"
+                <span class="flex-1" data-i18n="server.cfAccessTitle"
                   >Cloudflare Zero Trust 访问凭据 (可选)</span
                 >
-              </div>
+                <span
+                  id="server-cf-access-chevron"
+                  class="material-symbols-outlined"
+                  style="font-size: 18px"
+                  aria-hidden="true"
+                  >expand_more</span
+                >
+              </button>
+              <div id="server-cf-access-fields" class="server-service-token-fields hidden pt-3">
               <div>
                 <label
                   for="server-cf-client-id"
@@ -747,7 +790,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 />
               </div>
               <div>
-                <div class="flex items-center justify-between mb-2">
+                <div class="flex flex-wrap items-center justify-between gap-1 mb-2">
                   <label
                     for="server-cf-client-secret"
                     class="block text-xs font-bold tracking-[0.1em] text-muted"
@@ -775,20 +818,18 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                   class="hidden text-[10px] text-[var(--accent-secondary)] mt-1"
                 ></div>
               </div>
-              <div
-                class="text-[10px] text-muted"
-                data-i18n="server.cfAccessHint"
-              >
-                若在 Cloudflare Zero Trust 中为该域名开启了 Access 策略，需填入 Service Token
               </div>
             </div>
+            </section>
+            <section class="server-settings-section" aria-labelledby="server-auth-label">
             <div>
               <label
+                id="server-auth-label"
                 class="block text-xs font-bold tracking-[0.1em] text-muted mb-2"
                 data-i18n="auth.method"
                 >认证方式</label
               >
-              <div class="flex gap-2 mb-3">
+              <div class="server-choice-tabs mb-3">
                 <button
                   type="button"
                   id="modal-auth-tab-password"
@@ -807,12 +848,39 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 </button>
                 <button
                   type="button"
+                  id="modal-auth-tab-cf-ca"
+                  class="auth-tab hidden px-3 py-1 text-[11px] font-bold tracking-[0.1em] cursor-pointer transition-all"
+                  data-i18n="auth.cfSshCa"
+                >
+                  Cloudflare CA
+                </button>
+                <button
+                  type="button"
                   id="modal-auth-tab-none"
                   class="auth-tab px-3 py-1 text-[11px] font-bold tracking-[0.1em] cursor-pointer transition-all"
                   data-i18n="auth.none"
                 ></button>
               </div>
               <p id="modal-none-section" class="text-xs text-muted" style="display: none" data-i18n="auth.noneHint"></p>
+              <div id="modal-cf-ca-section" style="display: none" class="space-y-2">
+                <label
+                  for="server-cf-ca-team"
+                  class="block text-xs font-bold tracking-[0.1em] text-muted mb-1"
+                  data-i18n="auth.cfTeamName"
+                  >Zero Trust 团队标识</label
+                >
+                <div class="flex items-center">
+                  <span class="material-symbols-outlined text-muted mr-2" style="font-size: 16px">verified_user</span>
+                  <input
+                    id="server-cf-ca-team"
+                    class="terminal-input text-[13px]"
+                    data-i18n-placeholder="auth.cfTeamNamePlaceholder"
+                    placeholder="mycompany"
+                    type="text"
+                    autocomplete="off"
+                  />
+                </div>
+              </div>
               <div id="modal-password-section">
                 <div class="flex items-center">
                   <span
@@ -873,22 +941,18 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 "
               >
                 <option value="" data-i18n="region.auto">
-                  自动（保存时由系统推断）
+                  自动（部分场景需手动选择）
                 </option>
               </select>
               <div
                 id="server-region-inferred"
                 class="text-[10px] text-muted mt-1"
               ></div>
-              <div
-                id="server-region-tunnel-hint"
-                class="hidden text-[10px] text-muted mt-1"
-                data-i18n="server.tunnelRegionHint"
-              >
-                建议手动选择离内网主机物理位置最近的区域以降低隧道延迟；选择自动将由连接时的接入点决定
-              </div>
             </div>
-            <div class="pt-2">
+            </section>
+            </div>
+            </div>
+            <div class="server-modal-actions">
               <button
                 id="server-submit-btn"
                 class="cyber-button w-full py-3 px-4 text-xs font-bold tracking-[0.1em] uppercase flex items-center justify-center gap-2 bg-primary text-on-primary"
@@ -988,14 +1052,13 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 data-i18n-title="terminal.agent"
                 title="AI Agent 助手"
               >
-                <span
-                  class="material-symbols-outlined drawer-btn-icon"
-                  style="font-variation-settings: 'FILL' 0"
-                  >psychology</span
-                >
+                <span class="drawer-btn-icon" data-assistant-icon="agent" aria-hidden="true"></span>
                 <span class="drawer-btn-label" data-i18n="terminal.drawer.agent">Agent</span>
               </button>
             </div>
+            <button type="button" data-mcp-open class="desktop-terminal-action assistant-icon-button hidden" data-i18n-title="mcp.title" data-i18n-aria-label="mcp.title" aria-label="External AI assistant MCP settings" title="External AI assistant MCP settings">
+              <span data-assistant-icon="mcp" aria-hidden="true"></span>
+            </button>
             <button
               id="search-btn"
               class="desktop-terminal-action hover:opacity-80 transition-opacity cursor-pointer p-1 flex items-center justify-center"
@@ -1066,6 +1129,19 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
                 <option value="__custom__" data-i18n="theme.custom">Custom</option>
               </select>
             </label>
+            <div class="mobile-font-controls" role="group" data-i18n-aria-label="terminal.fontSize" aria-label="Terminal font size">
+              <span data-i18n="terminal.fontSize">Terminal font size</span>
+              <button id="mobile-font-smaller" type="button" data-i18n-aria-label="terminal.fontSmaller" aria-label="Smaller font">−</button>
+              <output id="mobile-font-value" aria-live="polite"></output>
+              <button id="mobile-font-larger" type="button" data-i18n-aria-label="terminal.fontLarger" aria-label="Larger font">+</button>
+              <button id="mobile-font-auto" type="button" aria-pressed="true" data-i18n="terminal.fontAuto">Auto</button>
+            </div>
+            <button id="mobile-select-text-btn" type="button">
+              <span class="material-symbols-outlined" aria-hidden="true">content_copy</span><span data-i18n="terminal.selectText">Select text</span>
+            </button>
+            <button id="mobile-tab-actions-btn" type="button">
+              <span class="material-symbols-outlined" aria-hidden="true">terminal</span><span data-i18n="terminal.tabActions">Current tab actions</span>
+            </button>
             <button id="mobile-search-btn" type="button">
               <span class="material-symbols-outlined" aria-hidden="true"
                 >search</span
@@ -1087,9 +1163,10 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
               ><span data-i18n="terminal.sftp">SFTP 文件管理器</span>
             </button>
             <button id="mobile-agent-btn" type="button" class="hidden">
-              <span class="material-symbols-outlined" aria-hidden="true"
-                >psychology</span
-              ><span data-i18n="terminal.agent">AI Agent 助手</span>
+              <span data-assistant-icon="agent" aria-hidden="true"></span><span data-i18n="terminal.agent">AI Agent 助手</span>
+            </button>
+            <button type="button" data-mcp-open class="hidden" data-i18n-title="mcp.title" data-i18n-aria-label="mcp.title" aria-label="External AI assistant MCP settings" title="External AI assistant MCP settings">
+              <span data-assistant-icon="mcp" aria-hidden="true"></span><span data-i18n="mcp.title">External AI assistant MCP settings</span>
             </button>
             <button id="mobile-export-btn" type="button">
               <span class="material-symbols-outlined" aria-hidden="true"
@@ -1178,6 +1255,11 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
           data-i18n-aria-label="terminal.mobileKeyboard"
           aria-label="终端快捷键"
         >
+          <div id="mobile-selection-actions" class="mobile-selection-actions hidden" role="group" data-i18n-aria-label="terminal.selectText" aria-label="Select text">
+            <button id="mobile-selection-copy-btn" type="button" data-i18n="terminal.copySelection" disabled>Copy selection</button>
+            <button id="mobile-selection-ai-btn" type="button" class="hidden" data-i18n="terminal.askAISelection">Ask AI assistant</button>
+            <button id="mobile-selection-cancel-btn" type="button" data-i18n="common.cancel">Cancel</button>
+          </div>
           <div class="mobile-terminal-toolbar-scroll">
             <button type="button" data-terminal-key="escape">Esc</button>
             <button type="button" data-terminal-key="tab">Tab</button>

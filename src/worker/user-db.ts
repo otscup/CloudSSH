@@ -1,5 +1,7 @@
 import { normalizeAIBaseUrl } from '../ai-endpoint';
-import { resolveAIModelBudgets } from '../ai-model-policy';
+import { McpStore } from './mcp-store';
+import type { McpActivity } from '../mcp-schema';
+import { resolveModelBudget } from '../ai-model-policy';
 import { ServerMemoryStore } from './server-memory-store';
 import { distillMemory } from './agent/memory';
 import { ResponsesError } from './agent/responses-client';
@@ -13,11 +15,13 @@ import {
   type SSHConnectionConfig,
   type SSHJumpHostConfig,
 } from '../types';
-import { CF_ACCESS_USER_GITHUB_ID, LOCAL_ADMIN_GITHUB_ID } from './auth';
+import { CF_ACCESS_USER_GITHUB_ID, LOCAL_ADMIN_GITHUB_ID, getAccessUserRouteKey } from './auth';
 import { inferLocationHint } from './ip-geo';
 import { isDetectedOS } from './os-detect';
 import { deserializeServerRow, serializeServerTags } from './server-tags';
 import { isValidTunnelHostname } from './tunnel-stream';
+import { extractPrivateKeyAndCertificate } from '../ssh/user-cert';
+import { sanitizeTeamName } from './cf-ssh-ca';
 
 const AUTH_METHODS = new Set(['password', 'publickey', 'none']);
 const MAX_JUMP_HOSTS = 3;
@@ -44,6 +48,7 @@ interface StoredServerRow {
   cf_tunnel_host: string | null;
   cf_access_client_id: string | null;
   cf_access_client_secret: string | null;
+  cf_ssh_ca_team: string | null;
 }
 
 // ====== 行形状帮助类型：与 UserDBDO 内各 SELECT 列一一对应（配合 query<T> 消除逐处 as unknown as） ======
@@ -65,13 +70,18 @@ type ServerRow = {
   cf_tunnel_host: string | null;
   cf_access_client_id: string | null;
   has_cf_access_client_secret: number;
+  cf_ssh_ca_team: string | null;
   last_connected_at: number | null;
   created_at: string;
   updated_at: string;
 };
 type UserIdRow = { user_id: number };
 type LoginThrottleRow = { fail_count: number; locked_until: number; last_fail_at: number };
-type JumpRow = { user_id: number; jump_server_id: number | null };
+type JumpRow = {
+  user_id: number;
+  jump_server_id: number | null;
+  cf_ssh_ca_team: string | null;
+};
 type ServerEditRow = {
   user_id: number;
   host: string;
@@ -84,6 +94,7 @@ type ServerEditRow = {
   cf_tunnel_host: string | null;
   cf_access_client_id: string | null;
   cf_access_client_secret: string | null;
+  cf_ssh_ca_team: string | null;
 };
 type ServerNameRow = { name: string };
 
@@ -100,12 +111,13 @@ function formatServerResponse(row: ServerRow) {
     cf_tunnel_host: row.cf_tunnel_host || null,
     cf_access_client_id: row.cf_access_client_id || null,
     has_cf_access_client_secret: Boolean(row.has_cf_access_client_secret),
+    cf_ssh_ca_team: row.cf_ssh_ca_team || null,
   };
 }
 type ShareMetaRow = { user_id: number; server_id: number; share_ref: string; status: string };
 type ThemeRow = { theme_data: string };
 type FingerprintRow = { fingerprint: string };
-type AIBudgetRow = { context_window?: number | null; max_output_tokens?: number | null };
+type AIBudgetRow = { context_window?: number | null; max_output_tokens?: number | null; budget_source?: string | null };
 type AIConfigRow = AIBudgetRow & { base_url: string; model: string; api_key_last4: string; updated_at: string };
 type AIConfigSecretRow = AIBudgetRow & { base_url: string; model: string; api_key_enc: string };
 
@@ -119,6 +131,9 @@ type AIConfigSecretRow = AIBudgetRow & { base_url: string; model: string; api_ke
  * - One-time-token 生成与消费（安全传递凭据）
  */
 export class UserDBDO {
+  private mcpStore: McpStore;
+  private alarmSchedule: Promise<void> = Promise.resolve();
+  private mcpState: DurableObjectState;
   private env: Env;
   private db: any; // SqlStorage (DO SQLite)
   // one-time-token 内存存储：token → { config, expiresAt }
@@ -131,23 +146,46 @@ export class UserDBDO {
 
   constructor(state: DurableObjectState, env: Env) {
     this.env = env;
+    this.mcpState = state;
     this.db = (state.storage as any).sql;
     this.initSchema();
+    this.mcpStore = new McpStore(this.db,
+      (value, userId) => this.encryptCredential(value, userId),
+      (value, userId) => this.decryptCredential(value, userId));
     this.memoryStore = new ServerMemoryStore(this.db,
       callback => typeof (state.storage as any).transactionSync === 'function'
         ? (state.storage as any).transactionSync(callback) : callback(),
       (value, userId) => this.encryptCredential(value, userId),
       (value, userId) => this.decryptCredential(value, userId),
-      async at => { if (typeof state.storage.setAlarm === 'function') await state.storage.setAlarm(at); });
+      async at => { await this.scheduleMcpAlarm(at); });
     // Old pending rows become recoverable after deployment/reconstruction, without a live SSH tab.
     if (typeof state.blockConcurrencyWhile === 'function') {
-      state.blockConcurrencyWhile(() => this.memoryStore.rearm());
+      state.blockConcurrencyWhile(async () => {
+        await this.memoryStore.rearm();
+        await this.scheduleMcpAlarm();
+      });
     }
   }
 
   async alarm(): Promise<void> {
     if (!this.memoryRun) this.memoryRun = this.processMemoryTask().finally(() => { this.memoryRun = null; });
-    await this.memoryRun;
+    try { await this.memoryRun; }
+    finally { await this.scheduleMcpAlarm(); }
+  }
+
+  /** Keep the earliest memory or activity deadline; no second background queue. */
+  private scheduleMcpAlarm(memoryDue?: number): Promise<void> {
+    const work = async () => {
+      const storage = this.mcpState.storage;
+      const cleanupDue = this.mcpStore.cleanup();
+      if (typeof storage.setAlarm !== 'function') return;
+      const current = typeof storage.getAlarm === 'function' ? await storage.getAlarm() : null;
+      const due = [cleanupDue, memoryDue, current].filter((value): value is number => value != null);
+      if (due.length) await storage.setAlarm(Math.max(Date.now() + 1, Math.min(...due)));
+    };
+    const scheduled = this.alarmSchedule.then(work);
+    this.alarmSchedule = scheduled.catch(() => {});
+    return scheduled;
   }
 
   private async processMemoryTask(): Promise<void> {
@@ -232,6 +270,7 @@ export class UserDBDO {
         cf_tunnel_host TEXT DEFAULT NULL,
         cf_access_client_id TEXT DEFAULT NULL,
         cf_access_client_secret TEXT DEFAULT NULL,
+        cf_ssh_ca_team TEXT DEFAULT NULL,
         last_connected_at INTEGER DEFAULT NULL,
         created_at  TEXT DEFAULT (datetime('now')),
         updated_at  TEXT DEFAULT (datetime('now'))
@@ -271,8 +310,9 @@ export class UserDBDO {
         model          TEXT NOT NULL,
         api_key_enc    TEXT NOT NULL,
         api_key_last4  TEXT,
-        context_window INTEGER NOT NULL DEFAULT 64000,
+        context_window INTEGER NOT NULL DEFAULT 128000,
         max_output_tokens INTEGER NOT NULL DEFAULT 8192,
+        budget_source TEXT,
         updated_at     TEXT DEFAULT (datetime('now'))
       );
 
@@ -346,6 +386,9 @@ export class UserDBDO {
     if (!aiColumns.some((column: any) => column.name === 'max_output_tokens')) {
       this.db.exec('ALTER TABLE ai_configs ADD COLUMN max_output_tokens INTEGER NOT NULL DEFAULT 8192');
     }
+    if (!aiColumns.some((column: any) => column.name === 'budget_source')) {
+      this.db.exec('ALTER TABLE ai_configs ADD COLUMN budget_source TEXT');
+    }
 
     // === Migration: 给既有 servers 表追加 region / inferred_hint 列（幂等） ===
     // SQLite 没有 ADD COLUMN IF NOT EXISTS，用 PRAGMA table_info 守卫
@@ -380,6 +423,9 @@ export class UserDBDO {
     if (!serverCols.some((c: any) => c.name === 'last_connected_at')) {
       this.db.exec('ALTER TABLE servers ADD COLUMN last_connected_at INTEGER DEFAULT NULL');
     }
+    if (!serverCols.some((c: any) => c.name === 'cf_ssh_ca_team')) {
+      this.db.exec('ALTER TABLE servers ADD COLUMN cf_ssh_ca_team TEXT DEFAULT NULL');
+    }
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_servers_jump ON servers(jump_server_id)');
     this.db.exec('CREATE INDEX IF NOT EXISTS idx_servers_last_connected ON servers(user_id, last_connected_at DESC)');
 
@@ -409,6 +455,10 @@ export class UserDBDO {
       const url = new URL(request.url);
       const path = url.pathname;
 
+      if (path === '/internal/mcp' && request.method === 'POST') {
+        return await this.handleMcp(request);
+      }
+
       // --- 用户管理 ---
       if (path === '/internal/oauth-user' && request.method === 'POST') {
         return this.handleOAuthUser(request);
@@ -437,6 +487,10 @@ export class UserDBDO {
       }
 
       // --- 服务器 CRUD ---
+      // 列表和保存都会读写 cf_ssh_ca_team；旧库若尚未迁移，先补列再查询。
+      if (path === '/internal/servers' || path.startsWith('/internal/servers/')) {
+        this.ensureCfSshCaTeamColumn();
+      }
       if (path === '/internal/servers' && request.method === 'GET') {
         const userIdStr = url.searchParams.get('user_id');
         if (!userIdStr) return Response.json({ error: 'Missing user_id' }, { status: 400 });
@@ -445,27 +499,29 @@ export class UserDBDO {
         return this.handleGetServers(userId);
       }
       if (path === '/internal/servers' && request.method === 'POST') {
-        return this.handleAddServer(request);
+        // 必须 await：async 函数里直接 return 被拒绝的 Promise 不会进入下面的 catch，
+        // Cloudflare 会把这次请求渲染成 Error 1101 页面。
+        return await this.handleAddServer(request);
       }
 
       // /internal/servers/:id
       const serverMatch = path.match(/^\/internal\/servers\/(\d+)$/);
       if (serverMatch) {
         const serverId = parseInt(serverMatch[1], 10);
-        if (request.method === 'PUT') return this.handleUpdateServer(serverId, request);
+        if (request.method === 'PUT') return await this.handleUpdateServer(serverId, request);
         if (request.method === 'DELETE') return this.handleDeleteServer(serverId, request);
       }
 
       // /internal/servers/:id/connect
       const connectMatch = path.match(/^\/internal\/servers\/(\d+)\/connect$/);
       if (connectMatch && request.method === 'POST') {
-        return this.handleConnectServer(parseInt(connectMatch[1], 10), request);
+        return await this.handleConnectServer(parseInt(connectMatch[1], 10), request);
       }
 
       // /internal/servers/:id/share-config —— 仅由 SSHShareDO 兑换一次性分享时调用
       const shareConfigMatch = path.match(/^\/internal\/servers\/(\d+)\/share-config$/);
       if (shareConfigMatch && request.method === 'POST') {
-        return this.handleShareConnectionConfig(parseInt(shareConfigMatch[1], 10), request);
+        return await this.handleShareConnectionConfig(parseInt(shareConfigMatch[1], 10), request);
       }
 
       // /internal/servers/:id/shares —— 分享元数据归所有者 UserDBDO 管理
@@ -654,9 +710,8 @@ export class UserDBDO {
       }
 
       return Response.json({ error: 'Not Found' }, { status: 404 });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error('[UserDB] Unhandled error:', msg);
+    } catch {
+      console.error('[UserDB] request failed');
       return Response.json({ error: '服务器内部错误' }, { status: 500 });
     }
   }
@@ -725,12 +780,10 @@ export class UserDBDO {
     );
     if (existing.length > 0) {
       if (existing[0].username !== cleanEmail) {
-        this.db.exec(
-          "UPDATE users SET username = ?, updated_at = datetime('now') WHERE github_id = ?",
-          cleanEmail,
-          CF_ACCESS_USER_GITHUB_ID
+        return Response.json(
+          { error: 'Access identity does not match this user database' },
+          { status: 403 }
         );
-        existing[0].username = cleanEmail;
       }
       return Response.json(existing[0]);
     }
@@ -786,11 +839,28 @@ export class UserDBDO {
    * - reset：登录成功后清零
    */
   private async handleLoginThrottle(request: Request): Promise<Response> {
-    const { action } = await request.json<{ action: string }>();
+    const body = await request.json<{ action: string; valid?: boolean }>();
+    let action = body.action;
+    const attempt = action === 'attempt';
 
     this.db.exec(
       'INSERT OR IGNORE INTO login_throttle (id, fail_count, locked_until, last_fail_at) VALUES (1, 0, 0, 0)'
     );
+
+    if (attempt) {
+      if (typeof body.valid !== 'boolean') {
+        return Response.json({ error: 'Invalid login result' }, { status: 400 });
+      }
+      const row = this.query<LoginThrottleRow>(
+        'SELECT fail_count, locked_until, last_fail_at FROM login_throttle WHERE id = 1'
+      )[0];
+      const remaining = (row?.locked_until ?? 0) - Date.now();
+      if (remaining > 0) {
+        return Response.json({ allowed: false, retryAfterSec: Math.ceil(remaining / 1000) });
+      }
+      // No await between the authoritative check and its fail/reset update.
+      action = body.valid ? 'reset' : 'fail';
+    }
 
     if (action === 'check') {
       const row = this.query<LoginThrottleRow>(
@@ -829,7 +899,7 @@ export class UserDBDO {
         now
       );
       const locked = lockedUntil > now;
-      return Response.json({
+      return Response.json(attempt ? { allowed: true, retryAfterSec: 0 } : {
         locked,
         retryAfterSec: locked ? Math.ceil((lockedUntil - now) / 1000) : 0,
       });
@@ -839,7 +909,9 @@ export class UserDBDO {
       this.db.exec(
         'UPDATE login_throttle SET fail_count = 0, locked_until = 0, last_fail_at = 0 WHERE id = 1'
       );
-      return Response.json({ locked: false, retryAfterSec: 0 });
+      return Response.json(attempt
+        ? { allowed: true, retryAfterSec: 0 }
+        : { locked: false, retryAfterSec: 0 });
     }
 
     return Response.json({ error: 'Invalid action' }, { status: 400 });
@@ -922,7 +994,7 @@ export class UserDBDO {
       `SELECT id, user_id, name, host, port, username, auth_method, region, inferred_hint, tags, os, jump_server_id,
               transport_type, cf_tunnel_host, cf_access_client_id,
               (cf_access_client_secret IS NOT NULL AND cf_access_client_secret != '') AS has_cf_access_client_secret,
-              last_connected_at, created_at, updated_at
+              cf_ssh_ca_team, last_connected_at, created_at, updated_at
        FROM servers WHERE user_id = ?
        ORDER BY (last_connected_at IS NULL) ASC, last_connected_at DESC, updated_at DESC`,
       userId
@@ -951,18 +1023,41 @@ export class UserDBDO {
       if (depth > MAX_JUMP_HOSTS) return `最多允许 ${MAX_JUMP_HOSTS} 级 SSH 跳转`;
 
       const rows: JumpRow[] = this.query<JumpRow>(
-        'SELECT user_id, jump_server_id FROM servers WHERE id = ?',
+        'SELECT user_id, jump_server_id, cf_ssh_ca_team FROM servers WHERE id = ?',
         currentId
       );
       if (rows.length === 0) return '所选跳板服务器不存在';
       const row = rows[0];
       if (row.user_id !== userId) return '不能使用其他用户的服务器作为跳板';
+      if (row.cf_ssh_ca_team) return 'Cloudflare SSH CA 认证的服务器不支持作为跳板机';
       currentId = row.jump_server_id ?? null;
     }
     return null;
   }
 
+  private ensureCfSshCaTeamColumn(): void {
+    const cols = this.db.exec('PRAGMA table_info(servers)').toArray() as Array<{ name?: string }>;
+    const exists = cols.some((column) => column?.name === 'cf_ssh_ca_team');
+    if (exists) return;
+    try {
+      this.db.exec('ALTER TABLE servers ADD COLUMN cf_ssh_ca_team TEXT DEFAULT NULL');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/duplicate column name/i.test(msg)) throw e;
+    }
+  }
+
   private async handleAddServer(request: Request): Promise<Response> {
+    try {
+      return await this.insertServer(request);
+    } catch {
+      console.error('[UserDB] add server failed');
+      return Response.json({ error: '保存服务器失败' }, { status: 500 });
+    }
+  }
+
+  private async insertServer(request: Request): Promise<Response> {
+    this.ensureCfSshCaTeamColumn();
     const body = await request.json<{
       user_id: number;
       name: string;
@@ -978,7 +1073,13 @@ export class UserDBDO {
       cf_tunnel_host?: string;
       cf_access_client_id?: string;
       cf_access_client_secret?: string;
+      cf_ssh_ca_team?: string | null;
     }>();
+
+    let cleanCfSshCaTeam: string | null = null;
+    if (typeof body.cf_ssh_ca_team === 'string' && body.cf_ssh_ca_team.trim().length > 0) {
+      cleanCfSshCaTeam = sanitizeTeamName(body.cf_ssh_ca_team);
+    }
 
     const port = body.port ?? 22;
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -987,8 +1088,9 @@ export class UserDBDO {
     if (!AUTH_METHODS.has(body.auth_method)) {
       return Response.json({ error: '不支持的认证方式' }, { status: 400 });
     }
+    const isCfCa = Boolean(cleanCfSshCaTeam);
     if (
-      body.auth_method !== 'none' &&
+      body.auth_method !== 'none' && !isCfCa &&
       (typeof body.credential !== 'string' ||
         (body.auth_method === 'publickey' && body.credential.length === 0))
     ) {
@@ -1049,9 +1151,12 @@ export class UserDBDO {
     // 下游节点或隧道连接不需要推断区域。
     const region = jumpServerId === null ? requestedRegion : null;
 
-    // none 不保存密码/私钥；沿用现有 NOT NULL 列，无需数据库迁移。
+    // none 或 cf_ca 模式不强制要求保存密码/私钥；沿用现有 NOT NULL 列，无需数据库迁移。
+    const credentialToEncrypt = typeof body.credential === 'string' ? body.credential : '';
     const encrypted =
-      body.auth_method === 'none' ? '' : await this.encryptCredential(body.credential, body.user_id);
+      body.auth_method === 'none' || (isCfCa && !credentialToEncrypt)
+        ? ''
+        : await this.encryptCredential(credentialToEncrypt, body.user_id);
 
     // Auto 模式保存时一次性推断 locationHint，结果持久化入 inferred_hint 列
     // 手动区域已经能够直接决定调度，无需向 IPinfo 发送主机信息
@@ -1083,8 +1188,9 @@ export class UserDBDO {
       `INSERT INTO servers (
         user_id, name, host, port, username, credential, auth_method,
         region, inferred_hint, tags, jump_server_id,
-        transport_type, cf_tunnel_host, cf_access_client_id, cf_access_client_secret
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        transport_type, cf_tunnel_host, cf_access_client_id, cf_access_client_secret,
+        cf_ssh_ca_team
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       body.user_id,
       body.name,
       body.host,
@@ -1099,7 +1205,8 @@ export class UserDBDO {
       transportType,
       cleanTunnelHost,
       cfAccessClientId,
-      encCfAccessClientSecret
+      encCfAccessClientSecret,
+      cleanCfSshCaTeam
     );
 
     // 获取新创建的记录
@@ -1107,7 +1214,7 @@ export class UserDBDO {
       `SELECT id, user_id, name, host, port, username, auth_method, region, inferred_hint, tags, os, jump_server_id,
               transport_type, cf_tunnel_host, cf_access_client_id,
               (cf_access_client_secret IS NOT NULL AND cf_access_client_secret != '') AS has_cf_access_client_secret,
-              last_connected_at, created_at, updated_at
+              cf_ssh_ca_team, last_connected_at, created_at, updated_at
        FROM servers WHERE user_id = ? ORDER BY id DESC LIMIT 1`,
       body.user_id
     );
@@ -1136,11 +1243,12 @@ export class UserDBDO {
       cf_tunnel_host?: string;
       cf_access_client_id?: string;
       cf_access_client_secret?: string | null;
+      cf_ssh_ca_team?: string | null;
     }>();
 
-    // 验证服务器属于该用户（行形状：user_id/host/port/auth_method/region/inferred_hint/jump_server_id/transport_type/cf_tunnel_host/cf_access_client_id/cf_access_client_secret）
+    // 验证服务器属于该用户（行形状：user_id/host/port/auth_method/region/inferred_hint/jump_server_id/transport_type/cf_tunnel_host/cf_access_client_id/cf_access_client_secret/cf_ssh_ca_team）
     const existing = this.query<ServerEditRow>(
-      'SELECT user_id, host, port, auth_method, region, inferred_hint, jump_server_id, transport_type, cf_tunnel_host, cf_access_client_id, cf_access_client_secret FROM servers WHERE id = ?',
+      'SELECT user_id, host, port, auth_method, region, inferred_hint, jump_server_id, transport_type, cf_tunnel_host, cf_access_client_id, cf_access_client_secret, cf_ssh_ca_team FROM servers WHERE id = ?',
       serverId
     );
     if (existing.length === 0) return Response.json({ error: 'Server not found' }, { status: 404 });
@@ -1339,6 +1447,27 @@ export class UserDBDO {
       values.push(null);
     }
 
+    if (body.cf_ssh_ca_team !== undefined) {
+      const cleanTeam =
+        typeof body.cf_ssh_ca_team === 'string' && body.cf_ssh_ca_team.trim().length > 0
+          ? sanitizeTeamName(body.cf_ssh_ca_team)
+          : null;
+      if (cleanTeam) {
+        const referenced = this.query<{ id: number }>(
+          'SELECT id FROM servers WHERE jump_server_id = ? LIMIT 1',
+          serverId
+        );
+        if (referenced.length > 0) {
+          return Response.json(
+            { error: 'Cloudflare SSH CA 认证的服务器不支持作为跳板机' },
+            { status: 400 }
+          );
+        }
+      }
+      updates.push('cf_ssh_ca_team = ?');
+      values.push(cleanTeam);
+    }
+
     if (updates.length > 0) {
       // Credential encryption and region inference may yield; validate again
       // immediately before the write so concurrent updates cannot create a cycle.
@@ -1347,7 +1476,6 @@ export class UserDBDO {
       updates.push("updated_at = datetime('now')");
       values.push(serverId);
       // SET 片段仅来自本函数硬编码白名单（列名 + '?' 或固定字面量），动态值全部经 values 参数绑定
-      // pi-lens-ignore: sql-injection
       this.db.exec(`UPDATE servers SET ${updates.join(', ')} WHERE id = ?`, ...values);
     }
 
@@ -1355,7 +1483,7 @@ export class UserDBDO {
       `SELECT id, user_id, name, host, port, username, auth_method, region, inferred_hint, tags, os, jump_server_id,
               transport_type, cf_tunnel_host, cf_access_client_id,
               (cf_access_client_secret IS NOT NULL AND cf_access_client_secret != '') AS has_cf_access_client_secret,
-              last_connected_at, created_at, updated_at
+              cf_ssh_ca_team, last_connected_at, created_at, updated_at
        FROM servers WHERE id = ?`,
       serverId
     );
@@ -1597,6 +1725,12 @@ export class UserDBDO {
     const pathSegments: string[] = [];
     for (let index = 0; index < chain.length; index++) {
       const server = chain[index];
+      if (index < chain.length - 1 && server.cf_ssh_ca_team) {
+        return Response.json(
+          { error: 'Cloudflare SSH CA 认证的服务器不支持作为跳板机' },
+          { status: 400 }
+        );
+      }
       const identity = index === 0 ? server.host : `jump:${pathSegments.join('>')}|${server.host}`;
       pathSegments.push(`${server.id}@${server.host}:${server.port}`);
       const known = this.db
@@ -1616,7 +1750,16 @@ export class UserDBDO {
         );
       }
     }
-    return { serverName: chain[chain.length - 1].name };
+    const target = chain[chain.length - 1];
+    if (target.cf_ssh_ca_team) {
+      return Response.json(
+        {
+          error: 'Cloudflare SSH CA 认证的服务器不支持创建一次性分享（临时凭据由登录设备动态持有）',
+        },
+        { status: 400 }
+      );
+    }
+    return { serverName: target.name };
   }
 
   private handleGetShare(shareId: string, userId: number): Response {
@@ -1908,8 +2051,8 @@ export class UserDBDO {
 
   // ==================== One-time-token 连接 ====================
 
-  private async handleConnectServer(serverId: number, request: Request): Promise<Response> {
-    const body = await request.json<{ user_id: number }>();
+  private async handleConnectServer(serverId: number, request: Request, configOnly = false): Promise<Response> {
+    const body = await request.json<{ user_id: number; ephemeralCredential?: string; routeKey?: string }>();
 
     // Resolve the saved relation into one bounded, immutable outer-to-target chain.
     const reversed: StoredServerRow[] = [];
@@ -1934,6 +2077,9 @@ export class UserDBDO {
 
     const chain = reversed.reverse();
     const target = chain[chain.length - 1];
+    if (configOnly && chain.some(server => server.cf_ssh_ca_team)) {
+      return Response.json({ error: 'interactive_auth_required' }, { status: 409 });
+    }
     const pathSegments: string[] = [];
     const resolved = await Promise.all(
       chain.map(async (server, index) => {
@@ -1941,7 +2087,7 @@ export class UserDBDO {
           index === 0 ? server.host : `jump:${pathSegments.join('>')}|${server.host}`;
         pathSegments.push(`${server.id}@${server.host}:${server.port}`);
         const credential =
-          server.auth_method === 'none'
+          server.auth_method === 'none' || !server.credential
             ? ''
             : await this.decryptCredential(server.credential, body.user_id);
         const khRows = this.query<FingerprintRow>(
@@ -1960,10 +2106,13 @@ export class UserDBDO {
       })
     );
 
+    if (configOnly && resolved.some(node => !node.expectedFingerprint)) {
+      return Response.json({ error: 'host_verification_required' }, { status: 409 });
+    }
     const outermost = chain[0];
     const locationHint = outermost.region || outermost.inferred_hint || undefined;
 
-    this.db.exec('UPDATE servers SET last_connected_at = ? WHERE id = ?', Date.now(), serverId);
+    if (!configOnly) this.db.exec('UPDATE servers SET last_connected_at = ? WHERE id = ?', Date.now(), serverId);
 
     const userRows = this.db
       .exec('SELECT github_id FROM users WHERE id = ?', body.user_id)
@@ -1971,23 +2120,43 @@ export class UserDBDO {
     if (userRows.length === 0) return Response.json({ error: 'User not found' }, { status: 404 });
     const github_id = (userRows[0] as any).github_id;
 
+    // Derive Access routing from the stored owner, including share redemption without a browser routeKey.
+    let tokenPrefix = String(github_id);
+    if (github_id === CF_ACCESS_USER_GITHUB_ID) {
+      const owner = this.one<{ username: string }>('SELECT username FROM users WHERE id = ?', body.user_id);
+      if (!owner?.username || !owner.username.includes('@')) {
+        return Response.json({ error: 'Invalid access user identity' }, { status: 403 });
+      }
+      tokenPrefix = await getAccessUserRouteKey(owner.username);
+      if (body.routeKey !== undefined && body.routeKey !== tokenPrefix) {
+        return Response.json({ error: 'Access route does not match the owner' }, { status: 403 });
+      }
+    }
+
     // 生成 one-time-token
-    const token = `${github_id}:${crypto.randomUUID()}`;
-    const jumpHosts: SSHJumpHostConfig[] = resolved.slice(0, -1).map((node) => ({
-      serverId: node.server.id,
-      name: node.server.name,
-      host: node.server.host,
-      port: node.server.port,
-      username: node.server.username,
-      password: node.server.auth_method === 'password' ? node.credential : '',
-      authMethod:
-        node.server.auth_method === 'none'
-          ? 'none'
-          : node.server.auth_method === 'publickey' ? 'publickey' : 'password',
-      privateKey: node.server.auth_method === 'publickey' ? node.credential : '',
-      expectedFingerprint: node.expectedFingerprint,
-      knownHostIdentity: node.identity,
-    }));
+    const token = `${tokenPrefix}:${crypto.randomUUID()}`;
+    const jumpHosts: SSHJumpHostConfig[] = resolved.slice(0, -1).map((node) => {
+      const isPubkey = node.server.auth_method === 'publickey';
+      const keyCert = isPubkey ? extractPrivateKeyAndCertificate(node.credential) : undefined;
+      return {
+        serverId: node.server.id,
+        name: node.server.name,
+        host: node.server.host,
+        port: node.server.port,
+        username: node.server.username,
+        password: node.server.auth_method === 'password' ? node.credential : '',
+        authMethod:
+          node.server.auth_method === 'none'
+            ? 'none'
+            : isPubkey
+              ? 'publickey'
+              : 'password',
+        privateKey: keyCert ? keyCert.privateKey : '',
+        certificate: keyCert?.certificate,
+        expectedFingerprint: node.expectedFingerprint,
+        knownHostIdentity: node.identity,
+      };
+    });
     const targetNode = resolved[resolved.length - 1];
     const isTunnel = target.transport_type === 'cf_tunnel';
     let cfAccessClientSecret: string | undefined;
@@ -1997,6 +2166,15 @@ export class UserDBDO {
         body.user_id
       );
     }
+    const targetKeyCert =
+      target.auth_method === 'publickey'
+        ? extractPrivateKeyAndCertificate(
+            target.cf_ssh_ca_team && body.ephemeralCredential && body.ephemeralCredential.trim().length > 0
+              ? body.ephemeralCredential
+              : targetNode.credential
+          )
+        : undefined;
+
     const config: SSHConnectionConfig = {
       host: target.host,
       port: target.port,
@@ -2005,12 +2183,16 @@ export class UserDBDO {
       authMethod:
         target.auth_method === 'none'
           ? 'none'
-          : target.auth_method === 'publickey' ? 'publickey' : 'password',
-      privateKey: target.auth_method === 'publickey' ? targetNode.credential : '',
+          : target.auth_method === 'publickey'
+            ? 'publickey'
+            : 'password',
+      privateKey: targetKeyCert ? targetKeyCert.privateKey : '',
+      certificate: targetKeyCert?.certificate,
       expectedFingerprint: targetNode.expectedFingerprint,
       knownHostIdentity: targetNode.identity,
       userId: String(body.user_id),
       githubId: String(github_id),
+      userDbRouteKey: tokenPrefix,
       serverId: target.id,
       os: target.os,
       locationHint,
@@ -2020,6 +2202,8 @@ export class UserDBDO {
       cfAccessClientId: isTunnel ? (target.cf_access_client_id || undefined) : undefined,
       cfAccessClientSecret: isTunnel ? cfAccessClientSecret : undefined,
     };
+
+    if (configOnly) return Response.json(config);
 
     // 防止 token 数量无限增长
     if (this.connectTokens.size >= UserDBDO.MAX_CONNECT_TOKENS) {
@@ -2036,6 +2220,44 @@ export class UserDBDO {
     });
 
     return Response.json({ token });
+  }
+
+  private async handleMcp(request: Request): Promise<Response> {
+    const body = await request.json<{ action: string; userId: number; routeKey: string; modeTag: string;
+      token: string; id: string; input: unknown; serverId: number; activity: McpActivity }>();
+    const store = this.mcpStore;
+    if (['settings', 'create', 'update', 'credentials'].includes(body.action)) {
+      try {
+        if (body.action === 'settings') return Response.json(store.get(body.userId, body.routeKey, body.modeTag));
+        if (body.action === 'credentials') return Response.json(await store.credentials(body.userId, body.routeKey, body.modeTag));
+        return Response.json(await store[body.action === 'create' ? 'create' : 'update'](body.userId, body.routeKey, body.modeTag, body.input));
+      } catch { return Response.json({ error: 'invalid_mcp_configuration' }, { status: 400 }); }
+    }
+    if (body.action === 'activity') return Response.json(store.activity(body.userId));
+    // This internal route is reachable only via a DO binding, never a public URL.
+    if (body.action === 'record') {
+      store.record(body.userId, body.activity);
+      await this.scheduleMcpAlarm();
+      return Response.json({ success: true });
+    }
+    const principal = await store.verify(body.token, body.modeTag);
+    if (!principal) return Response.json({ error: 'unauthorized' }, { status: 401 });
+    if (body.action === 'authorize' && !store.consumeRequest(principal.id)) {
+      return Response.json({ error: 'rate_limited' }, { status: 429 });
+    }
+    if (body.action === 'verify' || body.action === 'authorize') return Response.json(principal);
+    if (body.action === 'servers') {
+      const result = await this.handleGetServers(principal.userId).json<Record<string, unknown>[]>();
+      return Response.json(result.filter(server => principal.serverIds.includes(Number(server.id)))
+        .map(server => ({ id: server.id, name: server.name, tags: server.tags, os: server.os,
+          unattended: !server.cf_ssh_ca_team })));
+    }
+    if (body.action === 'config' && principal.serverIds.includes(body.serverId)) {
+      this.ensureCfSshCaTeamColumn();
+      return this.handleConnectServer(body.serverId, new Request('http://internal/config', { method: 'POST',
+        body: JSON.stringify({ user_id: principal.userId, routeKey: principal.routeKey }) }), true);
+    }
+    return Response.json({ error: 'forbidden' }, { status: 403 });
   }
 
   private async handleConsumeToken(request: Request): Promise<Response> {
@@ -2317,7 +2539,7 @@ export class UserDBDO {
 
   private handleGetAIConfig(userId: number): Response {
     const rows = this.query<AIConfigRow>(
-      'SELECT base_url, model, api_key_last4, updated_at, context_window, max_output_tokens FROM ai_configs WHERE user_id = ?',
+      'SELECT base_url, model, api_key_last4, updated_at, context_window, max_output_tokens, budget_source FROM ai_configs WHERE user_id = ?',
       userId
     );
 
@@ -2334,6 +2556,7 @@ export class UserDBDO {
       updated_at: row.updated_at,
       context_window: row.context_window,
       max_output_tokens: row.max_output_tokens,
+      budget_source: row.budget_source ?? 'model',
     });
   }
 
@@ -2343,8 +2566,8 @@ export class UserDBDO {
       base_url: string;
       model: string;
       api_key?: string;
-      context_window?: number | null;
-      max_output_tokens?: number | null;
+      provider_context_window?: number | null;
+      provider_max_output_tokens?: number | null;
     }>();
 
     if (!body.user_id || !body.base_url || !body.model) {
@@ -2357,7 +2580,7 @@ export class UserDBDO {
       return Response.json({ error: 'Invalid Responses API address', code: 'responses_address' }, { status: 400 });
     }
     const existing = this.query<AIConfigSecretRow>(
-      'SELECT base_url, model, api_key_enc, context_window, max_output_tokens FROM ai_configs WHERE user_id = ?', body.user_id
+      'SELECT base_url, model, api_key_enc, context_window, max_output_tokens, budget_source FROM ai_configs WHERE user_id = ?', body.user_id
     );
     const hasExistingKey = existing.length > 0 && !!existing[0].api_key_enc;
     if (!body.api_key && hasExistingKey) {
@@ -2370,16 +2593,14 @@ export class UserDBDO {
       return Response.json({ error: '首次配置必须填写 API Key' }, { status: 400 });
     }
 
-    let budgets: ReturnType<typeof resolveAIModelBudgets>;
-    const sameModel = existing[0]?.model === body.model && existing[0]?.base_url === body.base_url;
-    try {
-      budgets = resolveAIModelBudgets({
-        context_window: body.context_window === undefined && sameModel ? existing[0]?.context_window : body.context_window,
-        max_output_tokens: body.max_output_tokens === undefined && sameModel ? existing[0]?.max_output_tokens : body.max_output_tokens,
-      });
-    } catch {
-      return Response.json({ error: 'Invalid AI token budgets', code: 'responses_limits' }, { status: 400 });
-    }
+    const keptProvider = existing[0]?.budget_source === 'provider' && existing[0]?.model === body.model
+      ? { context_window: existing[0].context_window ?? undefined, max_output_tokens: existing[0].max_output_tokens ?? undefined }
+      : undefined;
+    const hinted = body.provider_context_window != null || body.provider_max_output_tokens != null
+      ? { context_window: body.provider_context_window ?? undefined, max_output_tokens: body.provider_max_output_tokens ?? undefined }
+      : keptProvider;
+    const budgets = resolveModelBudget(body.model, hinted);
+    const budgetSource = hinted?.context_window === budgets.context_window ? 'provider' : 'model';
 
     let encrypted: string | null = null;
     let last4: string | null = null;
@@ -2391,24 +2612,26 @@ export class UserDBDO {
 
     if (encrypted === null) {
       this.db.exec(
-        `INSERT INTO ai_configs (user_id, base_url, model, api_key_enc, api_key_last4, context_window, max_output_tokens, updated_at)
-         VALUES (?, ?, ?, '', '', ?, ?, datetime('now'))
+        `INSERT INTO ai_configs (user_id, base_url, model, api_key_enc, api_key_last4, context_window, max_output_tokens, budget_source, updated_at)
+         VALUES (?, ?, ?, '', '', ?, ?, ?, datetime('now'))
          ON CONFLICT(user_id) DO UPDATE SET
            base_url = excluded.base_url,
            model = excluded.model,
            context_window = excluded.context_window,
            max_output_tokens = excluded.max_output_tokens,
+           budget_source = excluded.budget_source,
            updated_at = excluded.updated_at`,
         body.user_id,
         body.base_url,
         body.model,
         budgets.context_window,
-        budgets.max_output_tokens
+        budgets.max_output_tokens,
+        budgetSource
       );
     } else {
       this.db.exec(
-        `INSERT INTO ai_configs (user_id, base_url, model, api_key_enc, api_key_last4, context_window, max_output_tokens, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        `INSERT INTO ai_configs (user_id, base_url, model, api_key_enc, api_key_last4, context_window, max_output_tokens, budget_source, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(user_id) DO UPDATE SET
            base_url = excluded.base_url,
            model = excluded.model,
@@ -2416,6 +2639,7 @@ export class UserDBDO {
            api_key_last4 = excluded.api_key_last4,
            context_window = excluded.context_window,
            max_output_tokens = excluded.max_output_tokens,
+           budget_source = excluded.budget_source,
            updated_at = excluded.updated_at`,
         body.user_id,
         body.base_url,
@@ -2423,7 +2647,8 @@ export class UserDBDO {
         encrypted,
         last4,
         budgets.context_window,
-        budgets.max_output_tokens
+        budgets.max_output_tokens,
+        budgetSource
       );
     }
 
@@ -2432,7 +2657,7 @@ export class UserDBDO {
 
   private async handleGetAIConfigDecrypted(userId: number): Promise<Response> {
     const rows = this.query<AIConfigSecretRow>(
-      'SELECT base_url, model, api_key_enc, context_window, max_output_tokens FROM ai_configs WHERE user_id = ?',
+      'SELECT base_url, model, api_key_enc, context_window, max_output_tokens, budget_source FROM ai_configs WHERE user_id = ?',
       userId
     );
 
@@ -2451,8 +2676,9 @@ export class UserDBDO {
       base_url: row.base_url,
       model: row.model,
       api_key: decrypted,
-      ...(row.context_window != null ? { context_window: row.context_window } : {}),
-      ...(row.max_output_tokens != null ? { max_output_tokens: row.max_output_tokens } : {}),
+      context_window: row.context_window,
+      max_output_tokens: row.max_output_tokens,
+      budget_source: row.budget_source ?? 'model',
     });
   }
 

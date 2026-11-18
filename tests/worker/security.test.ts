@@ -88,6 +88,36 @@ afterEach(() => {
 // 1. auth.ts — OAuth 回调 CSRF 防护
 // =====================================================================
 
+describe('Cookie API 写请求的同源边界', () => {
+  it.each([
+    ['POST', '/api/servers'], ['PUT', '/api/servers/7'], ['DELETE', '/api/servers/7'],
+    ['POST', '/api/known-hosts'], ['POST', '/api/snippets'], ['PUT', '/api/user/theme'],
+    ['POST', '/api/auth/logout'],
+  ])('rejects same-site cross-origin %s %s before using a session', async (method, path) => {
+    const worker = await loadWorker();
+    const userDbStub = makeDOStub(() => Response.json({ id: 1, github_id: 42 }));
+    const response = await worker.fetch(makeRequest(path, {
+      method,
+      headers: { Origin: 'https://other.cloudssh.test', 'Content-Type': 'text/plain' },
+      cookies: { session: '42:valid-session' },
+      body: { name: 'server', host: 'ssh.example.com', port: 22, username: 'alice', auth_method: 'none' },
+    }), makeEnv({ userDbStub }));
+    expect(response.status).toBe(403);
+    expect(userDbStub.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'https://cloudssh.test'])('preserves API writes with Origin=%s', async (origin) => {
+    const worker = await loadWorker();
+    const userDbStub = makeDOStub(() => Response.json({ id: 1, github_id: 42 }));
+    const response = await worker.fetch(makeRequest('/api/servers', {
+      method: 'POST', headers: origin ? { Origin: origin } : {},
+      cookies: { session: '42:valid-session' }, body: { name: 'server' },
+    }), makeEnv({ userDbStub }));
+    expect(response.status).toBe(200);
+    expect(userDbStub.fetch).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('内部 SSH 头部只能由 Worker 权威注入', () => {
   it.each([
     '/api/ssh',
@@ -1188,24 +1218,21 @@ describe('安全 — 一次性 token 与接缝鉴权', () => {
     expect(sshSessionStub.fetch).not.toHaveBeenCalled();
   });
 
-  it('伪造的 connect token → 403 Invalid or expired connection token', async () => {
+  it.each([
+    ['forged_token_xyz', 400],
+    ['123:forged_token_xyz', 403],
+  ])('伪造 connect token %s → %s；格式错误时不访问用户库', async (token, status) => {
     const worker = await loadWorker();
-    const env = makeEnv({
-      userDbStub: makeDOStub(() => new Response('{"error":"invalid"}', { status: 403 })),
+    const userDbStub = makeDOStub(() => new Response('{"error":"invalid"}', { status: 403 }));
+    const env = makeEnv({ userDbStub });
+    const req = makeRequest(`/api/ssh?token=${token}`, {
+      headers: { Upgrade: 'websocket', Origin: 'https://cloudssh.test' },
     });
-
-    const req = makeRequest('/api/ssh?token=forged_token_xyz', {
-      headers: {
-        Upgrade: 'websocket',
-        Origin: 'https://cloudssh.test',
-      },
-    });
-
     const res = await worker.fetch(req, env);
-
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(status);
     const data = await res.json();
     expect((data as { error?: string }).error).toMatch(/token|无效|expired/i);
+    expect(userDbStub.fetch).toHaveBeenCalledTimes(status === 400 ? 0 : 1);
   });
 
   it('SFTP attach 缺 session 参数 → 403 Missing SFTP attach token', async () => {
