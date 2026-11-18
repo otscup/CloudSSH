@@ -31,8 +31,13 @@ describe('Fork 工作流执行策略', () => {
     expect(deploy).not.toMatch(/^\s*continue-on-error:\s*true/m);
     expect(deploy).not.toMatch(/run: pnpm run test:e2e[^\n]*\|\|/);
     expect(
-      deploy.match(/^        if: github.event_name == 'push' && github.ref == 'refs\/heads\/(?:test|main)'$/gm)
-    ).toHaveLength(2);
+      deploy.match(/^        if: github.event_name == 'push' && github.ref == 'refs\/heads\/test'$/gm)
+    ).toHaveLength(1);
+    // Fork: production also deploys after a successful Sync upstream run,
+    // because GITHUB_TOKEN pushes do not trigger workflows.
+    expect(deploy).toContain(
+      "if: github.event_name == 'workflow_run' || github.ref == 'refs/heads/main'"
+    );
   });
 
   it('Fork 可直接手动同步，定时同步需要显式开启', () => {
@@ -52,7 +57,7 @@ describe('Fork 工作流执行策略', () => {
 });
 
 describe('CI 验证和部署边界', () => {
-  it('PR 和手动执行都经过完整验证，但部署步骤仅允许 test/main 的 push', () => {
+  it('PR 和手动执行都经过完整验证，部署步骤仅允许 test/main 的 push 或同步成功后的 workflow_run', () => {
     const deploy = readWorkflow('deploy.yml');
     expect(deploy).toContain('  pull_request:\n    branches: [test, main]');
     expect(deploy).toMatch(/^  workflow_dispatch:$/m);
@@ -63,8 +68,17 @@ describe('CI 验证和部署边界', () => {
     expect(deploy).toContain('run: pnpm test');
     const sections = deploy.split('      - name: Deploy verified artifact').slice(1);
     expect(sections).toHaveLength(2);
+    // Fork: the production step additionally allows workflow_run (Sync upstream
+    // chain), since GITHUB_TOKEN pushes do not trigger workflows. PRs can
+    // never deploy: their ref is refs/pull/N/merge, never refs/heads/main.
+    const allowedConditions = [
+      "if: github.event_name == 'push' && github.ref == 'refs/heads/test'",
+      "if: github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      "if: github.event_name == 'workflow_run' || github.ref == 'refs/heads/main'",
+    ];
     for (const section of sections) {
-      expect(section).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/");
+      const condition = section.match(/^        if: .*$/m)?.[0].trim();
+      expect(allowedConditions).toContain(condition);
       expect(section).toContain('CLOUDFLARE_API_TOKEN:');
     }
     expect(deploy.slice(0, deploy.indexOf('      - name: Deploy verified artifact'))).not.toContain('secrets.');
